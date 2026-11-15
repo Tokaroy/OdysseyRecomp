@@ -1,4 +1,4 @@
-# Status (update 52, 2026-11-14)
+# Status (update 54 / 0.2.5, 2026-11-15)
 
 Current state only. The investigations behind each item are in `docs/notes/`.
 
@@ -40,12 +40,21 @@ through on it at 60 fps.
 - Gyro, a Shake binding, two players (second controller), mouse camera past the stick's speed, in-app updates
   (Windows, tested: download, install, restart) - update 52. Gyro and two players not tried with real controllers.
 
+- The shader precompile reads every shader archive of the game (update 54): 19,876 programs before the first start
+  (12,820 in 0.2.4), agl's own archives paired through the programs drawn before; pipelines from a run through all
+  197 stages ship with the game (`notes/update-0.2.5-2026-11-15.md`).
+- Map warps: with the map open, the mouse moves its cursor and left click warps (GitHub #16; controller and keyboard
+  warps checked in hidden runs, a real mouse not).
+- A crash inside the Vulkan driver switches that driver to whole pipelines from the next start (GitHub #14; not tried
+  on the ROG Ally).
+- Updates download by themselves in the launcher and install with one click, Windows and Linux (Linux not run here).
+
 ## Known problems
 
 | Problem | State |
 | --- | --- |
 | A stage or effect seen for the first time can hold the picture for a moment (shader builds) | Upstream known issue; cached afterwards |
-| Only game version 1.0.0 | By design |
 | The first frames of a new scene (entering a kingdom, after a fall) take 150-350 ms: GPU work, not shaders | Open |
-| Linux build: needs a Linux environment (WSL2 / podman) | Open |
+| Linux: built on Windows (tools/linux/cross_build.sh), never run on Linux here | Open |
+| Game update 1.4.0 not supported yet (1.0.0 only) | Planned |
 | Not re-checked on the new base: puddle colours, the flicker by Mario's eye on the title | Open |

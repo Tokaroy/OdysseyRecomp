@@ -228,10 +228,16 @@ static void *work(void *) {
         }
         if (loader_peek_game((exefs + "/main").c_str()) != GAME_ODYSSEY) { fail(FAIL_VERSION); return NULL; }
         if (!file_exists(exefs + "/sdk")) { fail(FAIL_INCOMPLETE); return NULL; }
-        // (the picked folder can't be our own copy: setting up again deletes that first)
+        // The picked folder is our own copy (after an update a player picked the game files the setup had made - and was
+        // told "No game files found", GitHub #18): it isn't copied onto itself, the game code is made again from it.
         std::string mine = lower_slashes(std::string(rt_data_root()) + "/" + root);
         std::string pe = lower_slashes(exefs), pr = lower_slashes(romfs);
-        if (!pe.compare(0, mine.size(), mine) || !pr.compare(0, mine.size(), mine)) { fail(FAIL_NOT_FOUND); return NULL; }
+        bool own = !pe.compare(0, mine.size(), mine) || !pr.compare(0, mine.size(), mine);
+        if (own && data_there(root) && file_exists(root + "/exefs/main")) {
+            LOG("[setup] the picked folder is the copy set up before: the game code is made again from it\n");
+            goto build;
+        }
+        if (own) { fail(FAIL_NOT_FOUND); return NULL; }
         uint64_t rbytes = romfs_dir_bytes(romfs.c_str());
         double need = (double)rbytes / 1e9 + 1.5, have = free_gb(rt_data_root());  // (+ the game code while it builds)
         LOG("[setup] exefs %s, romfs %s (%.1f GB); %.1f GB free here\n", exefs.c_str(), romfs.c_str(), rbytes / 1e9, have);
@@ -259,6 +265,7 @@ static void *work(void *) {
         }
         g_frac = 0.2f;
     }
+build:
     set_step("Recompiling the game code...");
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {code_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};

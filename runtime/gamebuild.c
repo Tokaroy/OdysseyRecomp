@@ -266,6 +266,7 @@ typedef struct {
     char src[1100], obj[1100], log[1100];
     unsigned long long bytes;
     bool generated;  // (deleted once compiled; the entry file is the shipped one)
+    int tries;       // (compiles of it the system refused to start: see the compile loop)
 } Unit;
 
 typedef struct {
@@ -279,6 +280,7 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
         us->u = (Unit *)realloc(us->u, sizeof *us->u * us->cap);
     }
     Unit *u = &us->u[us->n++];
+    memset(u, 0, sizeof *u);
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
@@ -462,6 +464,17 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (r != 0) {
                 char last[300];
                 log_tail(u->log, last, sizeof last);
+                // "zig.exe: failed to spawn: AccessDenied" (GitHub #17): zig starts itself for each file, and antivirus
+                // programs that inspect every new process (RAV, Malwarebytes) refused some of those starts - not the
+                // code. Started again after a moment, with fewer compiles side by side; a file refused 6 times fails.
+                if ((strstr(last, "AccessDenied") || strstr(last, "Access is denied")) && ++u->tries < 6) {
+                    if (jobs > 1) jobs = jobs / 2 > 1 ? jobs / 2 : 1;
+                    LOG("[gamebuild] compiling %s: the system refused to start the compiler (try %d), again with %d jobs\n",
+                        u->src, u->tries, jobs);
+                    sleep_ms(500 * u->tries);
+                    PlatProc again = start_compile(&t, u, false);
+                    if (again) { run[k].p = again; continue; }
+                }
                 LOG("[gamebuild] compiling %s failed (exit %d): %s\n", u->src, r, last);
                 snprintf(why, why_size, "the game code didn't compile");
                 ok = false;

@@ -283,6 +283,18 @@ static void camera_stick_call(Cpu *c, int which) {
         v[0] += ex, v[1] += ey;
     }
 }
+// The kingdom map (GitHub #16, "impossible to warp between flags"): its cursor is the left stick and its zoom the right
+// one, so with the mouse captured every small hand movement zoomed the map in or out and the cursor never stayed on a
+// checkpoint flag ("A Warp" needs it on one). While the map is open (MapLayout::exeWait runs every frame then), the
+// mouse moves the map's cursor instead and its left button is A (warp): as a pointer would.
+static _Atomic uint64_t map_open_until;  // (plat_now_ns: the map was open just now)
+static GuestFn g_map_wait;
+static void map_wait_hook(Cpu *c) {
+    map_open_until = plat_now_ns() + 150000000ull;
+    g_map_wait(c);
+}
+static bool map_open(void) { return plat_now_ns() < map_open_until; }
+
 static void camera_stick_project(Cpu *c) { camera_stick_call(c, 0); }
 static void camera_stick_simple(Cpu *c) { camera_stick_call(c, 1); }
 void input_camera_hooks(void) {
@@ -297,6 +309,11 @@ void input_camera_hooks(void) {
         if (!a) continue;
         g_cam_stick[i] = dispatch_lookup(a);
         hle_override(a, fns[i], i ? "SimpleCameraInput::calcInputStick (mouse)" : "ProjectCameraInput::calcInputStick (mouse)");
+    }
+    uint64_t mw = loader_find_symbol("_ZN9MapLayout7exeWaitEv");
+    if (mw) {
+        g_map_wait = dispatch_lookup(mw);
+        hle_override(mw, map_wait_hook, "MapLayout::exeWait (the mouse on the map)");
     }
 }
 
@@ -572,6 +589,15 @@ static void fill_state(Cpu *c) {
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t mrx = 0, mry = 0;
     if (!menu) mouse_stick(&mrx, &mry);
+    if (!menu && mouse_held && map_open()) {  // (the map: the mouse is its cursor, a left click warps)
+        lx = clamp_axis(lx + mrx), ly = clamp_axis(ly + mry);
+        mrx = mry = 0;
+        if (held_mouse(SDL_BUTTON_LEFT)) {
+            b |= 1ull << BTN_A;
+            if (g_bind_mouse[BIND_Y] == SDL_BUTTON_LEFT && !held_key(g_bind_key[BIND_Y]) && !(pad_buttons & 1ull << BTN_Y))
+                b &= ~(1ull << BTN_Y);
+        }
+    }
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;

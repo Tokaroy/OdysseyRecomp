@@ -90,9 +90,11 @@ def main():
     o = Out(path)
     B = 'usr/bin'
     # the start script (the folder can be anywhere: it finds itself)
-    o.data('OdysseyRecomp.sh', b'#!/bin/sh\n# Odyssey Recomp: starts the game (its files are in ~/.local/share/odyssey-recomp)\n'
+    o.data('OdysseyRecomp.sh', b'#!/bin/sh\n# Odyssey Recomp: starts the game (saves, settings and game files: in this folder, or ~/.local/share/odyssey-recomp for 0.2.4 files)\n'
                                b'HERE=$(dirname "$(readlink -f "$0")")\nexec "$HERE/usr/bin/OdysseyRecomp" "$@"\n', 0o755)
     o.file(f'{B}/OdysseyRecomp', os.path.join(REPO, 'build', 'linux-x', 'OdysseyRecomp'), 0o755)
+    # RecompLauncher's manifest (0.2.5): its install keeps saves and settings in this folder (runtime/paths.c)
+    o.file('recomplauncher.json', os.path.join(REPO, 'recomplauncher.json'))
     o.file(f'{B}/icon.png', os.path.join(REPO, 'docs', 'icon', 'icon_512.png'))
     for f in ['third_party/imgui/misc/fonts/Roboto-Medium.ttf', 'runtime/nvn/vulkan/known_programs.txt',
               'runtime/nvn/vulkan/known_pipes.bin', 'README.md', 'LICENSE']:

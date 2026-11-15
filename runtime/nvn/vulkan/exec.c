@@ -2920,9 +2920,20 @@ static VkPipeline shader_lib_make(Prog *p, bool frag, int fill, bool cached_only
         uint64_t lay = 0;  // (the layout's content: sets, bindings, types - in any order)
         for (int i = 0; i < p->nbinds; i++)
             lay += (((uint64_t)p->binds[i].set << 40 | (uint64_t)p->binds[i].binding << 8 | (uint64_t)p->binds[i].type) + 1) * 0x9E3779B97F4A7C15ull;
-        LOG("[lib] start %s vs=%llx fs=%llx spv=%016llx lay=%016llx (ram %llu MB)\n", frag ? "fs" : "vs", (unsigned long long)p->code[0],
-            (unsigned long long)p->code[1], (unsigned long long)p->spv_key[frag ? 1 : 0], (unsigned long long)lay,
-            (unsigned long long)(plat_private_bytes() >> 20));
+        if (getenv("ODYSSEY_LOG_LIBS_CODE")) {  // (where its code comes from: the first bytes, to look for in the RomFS)
+            char path[96];
+            mkdir("build/livecode", 0755);
+            snprintf(path, sizeof path, "build/livecode/%llx.bin", (unsigned long long)p->code[frag ? 1 : 0]);
+            FILE *cf = fopen(path, "wb");
+            if (cf) { fwrite((const void *)(uintptr_t)p->code[frag ? 1 : 0], 1, 0x200, cf); fclose(cf); }
+        }
+        uint32_t rk = 0, ak = 0;  // (the keys besides the code: what a precompiled variant may lack)
+        for (int i = 0; i < 8; i++) rk |= (uint32_t)p->fkey.rt_kind[i] << (i * 4);
+        for (int i = 0; i < 32; i++) ak |= p->vkey.attr_kind[i] ? 1u << i : 0;
+        LOG("[lib] start %s vs=%llx fs=%llx spv=%016llx lay=%016llx rk=%x ak=%x flip %d%d dm %d ahead %d known %d (ram %llu MB)\n",
+            frag ? "fs" : "vs", (unsigned long long)p->code[0], (unsigned long long)p->code[1],
+            (unsigned long long)p->spv_key[frag ? 1 : 0], (unsigned long long)lay, rk, ak, p->vkey.flip_y, p->fkey.flip_x,
+            p->vkey.depth_minus_one, p->ahead, p->known, (unsigned long long)(plat_private_bytes() >> 20));
     }
     VkPipeline lib = VK_NULL_HANDLE;
     if (pbin && !cached_only) {
@@ -3185,7 +3196,27 @@ static void *pm_worker(void *arg) {
 // NVN's 0x12345678 header), with their sizes (+0x18 code, +0x1C control). The same code and control the game hands to
 // nvnProgramSetShaders - translated with the keys a program set up ahead gets (base_keys: Odyssey's window origin 1,
 // depth mode 0), so the SPIR-V and the binaries are the ones its first draw looks for.
-#define PC_ARCHIVES "ShaderData/alRenderMaterial.szs"
+// 0.2.4 read the material archive only: the effects (EffectPtcl: every particle, sparkle, smoke), the sky, clouds, depth
+// passes, post effects, the layouts' and two objects' own shaders were left for the game to set up in play, so a first
+// visit still compiled them ("the shader precompile doesn't load them all", a player on Reddit). Every archive of 1.0.0
+// that holds shaders (BNSH files: a scan of the whole RomFS, 2026-11-15) is read now.
+static const char *const PC_FILES[] = {
+    "ShaderData/alRenderMaterial.szs", "ShaderData/alRenderProgram.szs", "ShaderData/alRenderSky.szs",
+    "ShaderData/alRenderCloudLayer.szs", "ShaderData/alRenderDepthOnly.szs", "ShaderData/alPostEffectMask.szs",
+    "EffectData/EffectPtcl.szs", "LayoutData/CounterLife.szs", "LayoutData/CounterLifeKids.szs",
+    "LayoutData/CounterLifeUp.szs", "LayoutData/GaugeAir.szs", "LayoutData/ListItemParts.szs", "LayoutData/Map.szs",
+    "LayoutData/MiniGameRaceResult.szs", "LayoutData/TalkMessageInfo.szs", "ObjectData/CapWorldHomeGate000.szs",
+    "ObjectData/PeachWorldCastleInside.szs",
+    // agl's own shader archives (0.2.5): the engine's screen passes - HDR, fog, deferred lighting, shadows, ocean, clouds,
+    // the noise volumes of a scene start - and SystemData/AglResource (its debug and utility programs)
+    "ShaderData/alCloudShader.szs", "ShaderData/alCubeMapShader.szs", "ShaderData/alDeferredShading.szs",
+    "ShaderData/alHdrCompose.szs", "ShaderData/alLightMap.szs", "ShaderData/alNoiseShader.szs",
+    "ShaderData/alOceanCloudShader.szs", "ShaderData/alOceanShader.szs", "ShaderData/alOceanTextureShader.szs",
+    "ShaderData/alPointSpriteShader.szs", "ShaderData/alPostProcessFilter.szs", "ShaderData/alPrepassLight.szs",
+    "ShaderData/alProgramShader.szs", "ShaderData/alReducedShader.szs", "ShaderData/alRenderFog.szs",
+    "ShaderData/alShadowMaskShader.szs", "ShaderData/alStaticDepthShadowShader.szs", "ShaderData/alTemporalShader.szs",
+    "ShaderData/alThunderShader.szs", "ShaderData/alVignettingShader.szs", "SystemData/AglResource.szs"};
+#define PC_ARCHIVES "the game's shader archives"
 typedef struct { const uint8_t *code[2]; uint32_t cmax[2]; } PcProg;
 static PcProg *pc_progs;
 static int pc_n, pc_cap;
@@ -3195,15 +3226,68 @@ static PrepItem *pc_items;
 static uint32_t pc_le32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t pc_le64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 
+// One stage's code record: its code and where its constants start (what set_shaders takes as the code's end)
+// (*hlen: how much of it a draw hashes - prog_code_hash: up to its constants, 2 KB at most, and 2 KB when it has none:
+// set_shaders takes 0x10000 as the end then)
+static bool pc_stage(const uint8_t *bn, size_t size, uint64_t cs, const uint8_t **code, uint32_t *cmax, uint32_t *hlen) {
+    if (!cs || cs + 0x20 > size) return false;
+    uint64_t ctl = pc_le64(bn + cs + 8), cd = pc_le64(bn + cs + 0x10);
+    uint32_t csz = pc_le32(bn + cs + 0x18), ctlsz = pc_le32(bn + cs + 0x1C);
+    if (!(ctl && cd && cd + csz <= size && ctl + ctlsz <= size && ctlsz >= 0x704 && csz >= 0x80 && pc_le32(bn + cd) == 0x12345678))
+        return false;
+    uint32_t co = pc_le32(bn + ctl + 0x700);
+    *code = bn + cd;
+    *cmax = co && co <= csz ? co : csz;
+    uint64_t room = size - cd;
+    *hlen = co ? (co < 2048 ? co : 2048) : (uint32_t)(room < 2048 ? room : 2048);
+    return true;
+}
+
+typedef struct { const uint8_t *p; uint32_t len, hlen; } PcBlob;
+static int pc_agl_progs, pc_paired_progs;
+static bool pc_add_unique(uint64_t *seen, const uint8_t *vs, uint32_t vmax, const uint8_t *fs, uint32_t fmax) {
+    enum { SB = 16 };
+    uint64_t key = ((uint64_t)(uintptr_t)vs * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)fs) | 1;
+    uint32_t h = (uint32_t)(key >> (64 - SB));
+    for (int i = 0; i < 64; i++, h = (h + 1) & ((1 << SB) - 1)) {
+        if (seen[h] == key) return false;
+        if (!seen[h]) { seen[h] = key; break; }
+    }
+    if (pc_n == pc_cap) pc_progs = realloc(pc_progs, sizeof *pc_progs * (size_t)(pc_cap = pc_cap ? pc_cap * 2 : 4096));
+    pc_progs[pc_n++] = (PcProg){{vs, fs}, {vmax, fmax}};
+    return true;
+}
+static void pc_blob_add(PcBlob **l, int *n, const uint8_t *p, uint32_t len, uint32_t hlen) {
+    for (int i = *n - 1; i >= 0 && i >= *n - 64; i--) if ((*l)[i].p == p) return;  // (neighbours share theirs)
+    if (!(*n & 255)) *l = realloc(*l, sizeof **l * (size_t)(*n + 256));
+    (*l)[(*n)++] = (PcBlob){p, len, hlen};
+}
+
+static int pc_blob_cmp(const void *a, const void *b) {
+    uintptr_t x = (uintptr_t)((const PcBlob *)a)->p, y = (uintptr_t)((const PcBlob *)b)->p;
+    return x < y ? -1 : x > y;
+}
+static int pc_blob_unique(PcBlob *l, int n) {
+    if (n < 2) return n;
+    qsort(l, (size_t)n, sizeof *l, pc_blob_cmp);
+    int k = 1;
+    for (int i = 1; i < n; i++) if (l[i].p != l[k - 1].p) l[k++] = l[i];
+    return k;
+}
+
 static void pc_scan_bnsh(const uint8_t *bn, size_t size) {
     if (size < 0x80 || memcmp(bn, "BNSH", 4)) return;
     uint32_t g = (uint32_t)bn[0x16] | (uint32_t)bn[0x17] << 8;  // (the first block: grsc)
     if ((size_t)g + 0x28 > size || memcmp(bn + g, "grsc", 4)) return;
     uint32_t nvar = pc_le32(bn + g + 0x1C);
     uint64_t varr = pc_le64(bn + g + 0x20);
-    enum { SB = 16 };
-    static uint64_t seen[1 << SB];  // (variations share their code: each pair once)
+    static uint64_t seen[1 << 16];  // (variations share their code: each pair once)
     memset(seen, 0, sizeof seen);
+    // every vertex and fragment shader of the file, paired below as the programs drawn before pair them: the game also
+    // draws a vertex shader with another variation's fragment shader (alRenderDepthOnly's, with one shared fragment
+    // shader), and a vertex shader's library is made for the pair (their bindings: one pipeline layout)
+    PcBlob *vlone = NULL, *fall = NULL;
+    int nvl = 0, nfa = 0;
     for (uint32_t v = 0; v < nvar; v++) {
         uint64_t vo = varr + (uint64_t)v * 64;
         if (vo + 64 > size) break;
@@ -3211,32 +3295,90 @@ static void pc_scan_bnsh(const uint8_t *bn, size_t size) {
         if (!prog || prog + 0x38 > size) continue;
         uint64_t st[6];
         for (int i = 0; i < 6; i++) st[i] = pc_le64(bn + prog + 8 + 8 * i);  // vertex, hull, domain, geometry, fragment, compute
-        if (!st[0] || !st[4] || st[1] || st[2] || st[3] || st[5]) continue;
-        PcProg pp;
-        bool ok = true;
-        for (int k = 0; k < 2 && ok; k++) {
-            uint64_t cs = st[k ? 4 : 0];
-            if (cs + 0x20 > size) { ok = false; break; }
-            uint64_t ctl = pc_le64(bn + cs + 8), cd = pc_le64(bn + cs + 0x10);
-            uint32_t csz = pc_le32(bn + cs + 0x18), ctlsz = pc_le32(bn + cs + 0x1C);
-            ok = ctl && cd && cd + csz <= size && ctl + ctlsz <= size && ctlsz >= 0x704 && csz >= 0x80 && pc_le32(bn + cd) == 0x12345678;
-            if (!ok) break;
-            uint32_t co = pc_le32(bn + ctl + 0x700);  // (where its constants start: what set_shaders takes as the code's end)
-            pp.code[k] = bn + cd;
-            pp.cmax[k] = co && co <= csz ? co : csz;
-        }
-        if (!ok) continue;
-        uint64_t key = ((uint64_t)(uintptr_t)pp.code[0] * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)pp.code[1]) | 1;
-        uint32_t h = (uint32_t)(key >> (64 - SB));
-        bool dup = false;
-        for (int i = 0; i < 64; i++, h = (h + 1) & ((1 << SB) - 1)) {
-            if (seen[h] == key) { dup = true; break; }
-            if (!seen[h]) { seen[h] = key; break; }
-        }
-        if (dup) continue;
-        if (pc_n == pc_cap) pc_progs = realloc(pc_progs, sizeof *pc_progs * (size_t)(pc_cap = pc_cap ? pc_cap * 2 : 4096));
-        pc_progs[pc_n++] = pp;
+        if (st[1] || st[2] || st[3] || st[5]) continue;
+        const uint8_t *vc = NULL, *fc = NULL;
+        uint32_t vm = 0, fm = 0, vh = 0, fh = 0;
+        bool hv = pc_stage(bn, size, st[0], &vc, &vm, &vh), hf = pc_stage(bn, size, st[4], &fc, &fm, &fh);
+        if (hf) pc_blob_add(&fall, &nfa, fc, fm, fh);
+        if (hv) pc_blob_add(&vlone, &nvl, vc, vm, vh);
+        if (hv && hf) pc_add_unique(seen, vc, vm, fc, fm);
     }
+    nvl = pc_blob_unique(vlone, nvl);
+    nfa = pc_blob_unique(fall, nfa);
+    if (nvl && nfa && (long long)nvl * nfa <= 4 << 20)  // (alRenderMaterial's 12,822 are its variations' own pairs only)
+        for (int v = 0; v < nvl; v++) {
+            uint64_t hvv = hash_words(0x9e3779b97f4a7c15ull, vlone[v].p, vlone[v].hlen);
+            for (int f = 0; f < nfa; f++) {
+                bool warm;
+                if (drawn_has(hash_words(hvv, fall[f].p, fall[f].hlen) | 1, &warm) &&
+                    pc_add_unique(seen, vlone[v].p, vlone[v].len, fall[f].p, fall[f].len))
+                    pc_paired_progs++;
+            }
+        }
+    free(vlone);
+    free(fall);
+}
+
+// agl's shader archives (.sharcb, magic "BAHS", version 9): +0x14 the records (NVN control sections: only some
+// variations have a whole one, the others a patch of one), +0x18 the code's size, +0x1C where the code starts: one
+// block per shader, 256-aligned, each starting with NVN's 0x12345678 header (its stage in the SPH type at +0x30:
+// 1 vertex, 5 fragment). Which vertex shader goes with which fragment shader is in the program list of the source
+// archive (.sharc), not here - so the pairs come from the programs drawn before (known_programs.txt, shipped: a run
+// through every stage; and this player's cache/drawn_programs.bin): each vertex x fragment pair of an archive is
+// hashed as a draw hashes it (prog_code_hash) and the drawn ones are compiled. The hash takes up to 2 KB of each
+// shader's code up to its constants; a block's constants are its last 0x100 bytes or none, so both ends are tried.
+// The translation reads the code from its start (the block's end is only a bound), as a draw without constants does.
+// The code blocks between from and to (256-aligned from sb) paired through the programs drawn before; *count: how many
+static void pc_match_blocks(const uint8_t *sb, uint64_t from, uint64_t to, int *count) {
+    uint64_t co = from, csz = to - from, total = to;
+    PcBlob *vs = NULL, *fs = NULL;
+    int nv = 0, nf = 0;
+    uint64_t last = 0;
+    int lastk = -1;
+    for (uint64_t o = co; o + 0x80 <= co + csz; o += 0x100) {
+        if (pc_le32(sb + o) != 0x12345678) continue;
+        if (lastk >= 0) {  // (the one before ends here)
+            PcBlob *b = lastk ? &fs[nf - 1] : &vs[nv - 1];
+            b->len = (uint32_t)(o - last);
+        }
+        int type = (int)(pc_le32(sb + o + 0x30) >> 10 & 15);
+        uint32_t room = (uint32_t)(total - o < 2048 ? total - o : 2048);
+        if (type == 1) { vs = realloc(vs, sizeof *vs * (size_t)(nv + 1)); vs[nv++] = (PcBlob){sb + o, 0, room}; lastk = 0; }
+        else if (type == 5) { fs = realloc(fs, sizeof *fs * (size_t)(nf + 1)); fs[nf++] = (PcBlob){sb + o, 0, room}; lastk = 1; }
+        else { lastk = -1; continue; }
+        last = o;
+    }
+    if (lastk >= 0) (lastk ? &fs[nf - 1] : &vs[nv - 1])->len = (uint32_t)(co + csz - last);
+    if ((long long)nv * nf > 1 << 20) nv = 0;  // (alRenderMaterial, EffectPtcl: their variations' own pairs only)
+    for (int v = 0; v < nv; v++)
+        for (int cv = 0; cv < 3; cv++) {  // (its end: the block's, 0x100 before it (constants), none (2 KB hashed))
+            uint32_t vmax = cv == 2 ? vs[v].hlen : vs[v].len - (cv ? 0x100 : 0);
+            if (!vmax || vmax > (cv == 2 ? 2048u : vs[v].len) || (cv == 1 && vs[v].len >= 0x900) || (cv == 2 && vs[v].len >= 0x800))
+                continue;  // (ends past 2 KB: one hash)
+            uint64_t hv = hash_words(0x9e3779b97f4a7c15ull, vs[v].p, vmax < 2048 ? vmax : 2048);
+            for (int f = 0; f < nf; f++)
+                for (int cf = 0; cf < 3; cf++) {
+                    uint32_t fmax = cf == 2 ? fs[f].hlen : fs[f].len - (cf ? 0x100 : 0);
+                    if (!fmax || fmax > (cf == 2 ? 2048u : fs[f].len) || (cf == 1 && fs[f].len >= 0x900) || (cf == 2 && fs[f].len >= 0x800))
+                        continue;
+                    uint64_t h = hash_words(hv, fs[f].p, fmax < 2048 ? fmax : 2048) | 1;
+                    bool warm;
+                    if (!drawn_has(h, &warm)) continue;
+                    if (pc_n == pc_cap) pc_progs = realloc(pc_progs, sizeof *pc_progs * (size_t)(pc_cap = pc_cap ? pc_cap * 2 : 4096));
+                    pc_progs[pc_n++] = (PcProg){{vs[v].p, fs[f].p}, {vs[v].len, fs[f].len}};
+                    (*count)++;
+                    cf = 3;  // (one end matched)
+                }
+        }
+    free(vs);
+    free(fs);
+}
+
+static void pc_scan_sharcb(const uint8_t *sb, size_t size) {
+    if (size < 0x20 || memcmp(sb, "BAHS", 4) || pc_le32(sb + 4) != 9) return;
+    uint64_t total = pc_le32(sb + 8), csz = pc_le32(sb + 0x18), co = pc_le32(sb + 0x1C);
+    if (total > size || co + csz > total || co & 0xFF) return;
+    pc_match_blocks(sb, co, co + csz, &pc_agl_progs);
 }
 
 static void *pc_worker(void *arg) {
@@ -3278,20 +3420,32 @@ static void *pc_worker(void *arg) {
 // false: the game's files weren't readable (nothing to precompile).
 static bool precompile_collect(const char *out, int nt) {
     uint64_t t0 = plat_now_ns();
-    size_t zn = 0, n = 0;
-    uint8_t *z = romfs_read_file("extracted/romfs.bin", PC_ARCHIVES, &zn);
-    uint8_t *d = z ? yaz0_decode(z, zn, &n) : NULL;
-    free(z);
-    if (!d) { LOG("[precompile] %s not readable from extracted/romfs.bin\n", PC_ARCHIVES); return false; }
-    static const char *const members[] = {"alRenderMaterial.bfsha", "alRenderMaterialUber.bfsha"};
-    for (int m = 0; m < 2; m++) {
-        size_t fn = 0;
-        const uint8_t *f = sarc_find(d, n, members[m], &fn);
-        if (!f) continue;
-        for (size_t o = 0; o + 4 <= fn; o += 8)  // (the BNSH file inside: 8-aligned at least)
-            if (!memcmp(f + o, "BNSH", 4)) { pc_scan_bnsh(f + o, fn - o); break; }
+    enum { NFILES = sizeof PC_FILES / sizeof *PC_FILES };
+    uint8_t *bufs[NFILES] = {0};  // (kept until the programs are translated: pc_progs point into them)
+    int nbnsh = 0;
+    for (int fi = 0; fi < NFILES; fi++) {
+        size_t zn = 0, n = 0;
+        uint8_t *z = romfs_read_file("extracted/romfs.bin", PC_FILES[fi], &zn);
+        uint8_t *d = z && zn > 4 && !memcmp(z, "Yaz0", 4) ? yaz0_decode(z, zn, &n) : NULL;
+        if (z && !d) d = z, n = zn, z = NULL;  // (not compressed)
+        free(z);
+        if (!d) { LOG("[precompile] %s not readable from extracted/romfs.bin\n", PC_FILES[fi]); continue; }
+        bufs[fi] = d;
+        int before = pc_n;
+        // every shader file in it, wherever it sits (archives in archives, effect resources): its magic, 8-aligned
+        int had = nbnsh;
+        for (size_t o = 0; o + 0x80 <= n; o += 8)
+            if (!memcmp(d + o, "BNSH", 4)) { pc_scan_bnsh(d + o, n - o); nbnsh++; }
+            else if (!memcmp(d + o, "BAHS", 4)) { pc_scan_sharcb(d + o, n - o); nbnsh++; had = 1 << 30; }
+        // a BNSH file's code blocks paired as drawn too: the game draws vertex shaders with other variations' fragment
+        // shaders (alRenderDepthOnly: one the variations don't list), and a vertex library is made per pair (its layout)
+        if (nbnsh > had) pc_match_blocks(d, 0, n, &pc_paired_progs);
+        LOG("[precompile] %s: %d programs\n", PC_FILES[fi], pc_n - before);
     }
-    LOG("[precompile] %d programs in %s (read in %.1f s)\n", pc_n, PC_ARCHIVES, (plat_now_ns() - t0) / 1e9);
+    uint8_t *d = NULL;  // (the buffers are freed below)
+    if (!pc_n) { LOG("[precompile] no shaders found in the game's files\n"); return false; }
+    LOG("[precompile] %d programs (%d agl's and %d cross-variation pairs, as drawn before) in %d shader files of %s (read in %.1f s)\n",
+        pc_n, pc_agl_progs, pc_paired_progs, nbnsh, PC_ARCHIVES, (plat_now_ns() - t0) / 1e9);
     pc_items = malloc(sizeof *pc_items * (size_t)(pc_n ? pc_n : 1));
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
@@ -3312,6 +3466,7 @@ static bool precompile_collect(const char *out, int nt) {
     free(pc_items);
     free(pc_progs);
     free(d);
+    for (int fi = 0; fi < NFILES; fi++) free(bufs[fi]);
     return ok;
 }
 
@@ -3574,7 +3729,16 @@ static void prec_load_file(const char *path) {
     uint32_t magic = 0, size = 0;
     if (fread(&magic, 4, 1, f) == 1 && fread(&size, 4, 1, f) == 1 && magic == 0x31455050 /* PPE1 */ && size == sizeof(PipeRec)) {
         PipeRec r;
-        while (fread(&r, sizeof r, 1, f) == 1) { r.k.prog = NULL; prec_add(&r); }
+        // (the game's depth-stencil format is D24S8 where the GPU has it and D32S8 where it doesn't - AMD: textures.c
+        // depth24_stencil8. The shipped list was recorded on NVIDIA: its D24S8 is this GPU's choice here)
+        extern VkFormat vk_depth24_stencil8(void);
+        VkFormat d24 = g_vk.dev ? vk_depth24_stencil8() : VK_FORMAT_D24_UNORM_S8_UINT;
+        while (fread(&r, sizeof r, 1, f) == 1) {
+            r.k.prog = NULL;
+            if (r.k.depth == VK_FORMAT_D24_UNORM_S8_UINT) r.k.depth = d24;
+            if (r.k.stencil == VK_FORMAT_D24_UNORM_S8_UINT) r.k.stencil = d24;
+            prec_add(&r);
+        }
     }
     fclose(f);
 }

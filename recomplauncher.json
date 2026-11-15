@@ -9,13 +9,13 @@
     "check": { "nup_build_id": "3ca12dfaaf9c82da" }
   },
   "prepare": {
-    "program": ["OdysseyRecomp.exe"],
+    "program": ["OdysseyRecomp.exe", "OdysseyRecomp.sh"],
     "args": ["--setup", "{game}"],
     "label": "Copying your game files and building the game code (a few minutes, once)",
     "timeout": 3600
   },
   "start": {
-    "program": ["OdysseyRecomp.exe"]
+    "program": ["OdysseyRecomp.exe", "OdysseyRecomp.sh"]
   },
   "saves": ["{install}/save", "{install}/odyssey.ini"],
   "folders": {

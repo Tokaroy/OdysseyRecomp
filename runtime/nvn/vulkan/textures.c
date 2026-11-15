@@ -36,6 +36,8 @@ static VkFormat depth24_stencil8(void) {
     return f;
 }
 
+VkFormat vk_depth24_stencil8(void) { return depth24_stencil8(); }  // (exec.c: remembered pipelines' depth format here)
+
 static VkFmt fmt_of(uint32_t f) {
     switch (f) {
     case 0x01: return (VkFmt){VK_FORMAT_R8_UNORM};

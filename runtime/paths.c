@@ -106,6 +106,18 @@ void rt_paths_init(void) {
         const char *base = xdg && *xdg == '/' ? xdg : NULL;
         if (base) snprintf(root, sizeof root, "%s/odyssey-recomp", base);
         else snprintf(root, sizeof root, "%s/.local/share/odyssey-recomp", home && *home ? home : "/tmp");
+        // 0.2.5: next to the program, as on Windows, when it came with recomplauncher.json (the release's tar.gz,
+        // RecompLauncher's install: the launcher keeps saves, settings and mods in {install}) - unless an earlier
+        // version's files are in the folder above already (0.2.4 kept them there: they stay where they are)
+        char top[1024], mark[1100], old[1100];
+        snprintf(top, sizeof top, "%s/../..", g_exe_dir);  // (usr/bin -> the folder with OdysseyRecomp.sh)
+        snprintf(mark, sizeof mark, "%s/recomplauncher.json", top);
+        snprintf(old, sizeof old, "%s/extracted", root);
+        if (g_exe_dir[0] && access(mark, F_OK) == 0 && !is_dir(old) && writable(top)) {
+            char *rp = realpath(top, NULL);
+            snprintf(root, sizeof root, "%s", rp ? rp : top);
+            free(rp);
+        }
 #else
         const char *home = getenv("HOME");
         snprintf(root, sizeof root, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : "/tmp");
