@@ -481,16 +481,23 @@ static void tab_display(void) {
     }
 #ifndef __APPLE__  // (Vulkan: runtime/nvn/interp.c; device.c rt_set_fullscreen picks the display mode for it)
     {
-        static const char *lim[] = {"60 fps", "120 fps"};
-        int v = g_settings.frame_interp;
-        if (opt_choice("Frame limiter", &v, lim, 2, 0,
+        static const char *lim[] = {"60 fps", "120 fps", "180 fps", "240 fps", "Match display"};
+        static const int rates[] = {60, 120, 180, 240, 0};
+        int v = 0;
+        for (int i = 0; i < 5; i++) if (rates[i] == g_settings.frame_rate) v = i;
+        if (opt_choice("Frame rate", &v, lim, 5, 0,
                        "How many images a second you see. 60 fps: the game's own frames, each shown once - in "
                        "fullscreen a 144 / 165 Hz display switches to its 60 Hz mode, so movement stays perfectly even. "
                        "The smoothest choice on 144 / 165 Hz.\n\n120 fps: an extra image between each two of the game's "
                        "frames, made from the game's own state halfway (frame interpolation; experimental). For displays "
                        "at 120 or 240 Hz: on 144 / 165 Hz the 120 images can't come evenly. About twice the GPU work, "
-                       "half a frame of delay; the game itself still runs at 60.")) {
-            g_settings.frame_interp = v != 0;
+                       "half a frame of delay; the game itself still runs at 60.\n\n180 / 240 fps: two / three images "
+                       "between each two of the game's frames, each drawn again by the GPU from the game's state at that "
+                       "moment - real frames, not blended pictures. Match display: as many as the display shows (up to "
+                       "240). Never more than the display's refresh rate; an image the GPU can't make in time is left "
+                       "out rather than slow the game.")) {
+            g_settings.frame_rate = rates[v];
+            g_settings.frame_interp = rates[v] != 60;
             if (g_settings.fullscreen) g_want_fullscreen_apply.store(true);  // (60 Hz mode, or the desktop's rate)
         }
     }
@@ -516,9 +523,10 @@ static void tab_display(void) {
     // (up to 8K: 7680 x 4320 - more only ran out of GPU memory)
     // (named by their size, fixed sizes only: Match display, Dynamic and the shares of the display removed for more
     // quality steps - the player, 2026-11-07; 720p / 900p taken out again, the player's wish)
-    static const char *res[] = {"1080p", "1440p", "4K", "5K", "6K", "8K"};
-    static const int res_mode[] = {1, RES_1440, 2, RES_5K, 3, 4};
-    enum { RES_DEFAULT_AT = 1 };
+    // (0.2.6: 720p back for handhelds - the Steam Deck's own default: its screen is 800p)
+    static const char *res[] = {"720p (handhelds)", "1080p", "1440p", "4K", "5K", "6K", "8K"};
+    static const int res_mode[] = {RES_720, 1, RES_1440, 2, RES_5K, 3, 4};
+    enum { RES_DEFAULT_AT = 2 };
     enum { NRES = sizeof res_mode / sizeof res_mode[0] };
     {
         int ri = RES_DEFAULT_AT;
@@ -737,6 +745,16 @@ static void tab_about(void) {
                        "(Xbox: A B X Y, LB RB LT RT; PlayStation: Cross Circle Square Triangle, L1 R1 L2 R2), for the "
                        "button that does it with your bindings. Auto: your controller's.")) {
             g_settings.button_icons = v;
+            settings_save();
+        }
+    }
+    {
+        int s = g_settings.motion_sens;
+        if (opt_int("Motion sensitivity", &s, 0, 200, 10, 60, "%d%%",
+                    "How strongly the controller's gyro and accelerometer reach the game (motion cap throws, the "
+                    "roll boost). Lower it if throws happen by themselves (a controller's own rumble can shake it); "
+                    "0% turns motion off. The Shake binding works at any setting.")) {
+            g_settings.motion_sens = s;
             settings_save();
         }
     }

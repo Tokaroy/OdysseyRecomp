@@ -747,7 +747,10 @@ static uint64_t motion_last_ns;
 static int64_t motion_sampling;
 static pthread_mutex_t motion_lock = PTHREAD_MUTEX_INITIALIZER;
 
+void dsu_start(void);                    // runtime/hle/dsu.c
+bool dsu_motion(float acc[3], float gyro[3]);
 static void motion_sensors_on(void) {  // (motion_lock)
+    dsu_start();
     SDL_Gamepad *p = pad;
     if (p == motion_pad) return;
     motion_pad = p;
@@ -757,10 +760,21 @@ static void motion_sensors_on(void) {  // (motion_lock)
 }
 
 // One state, now: what the sensors read (or the Shake binding's flick), the orientation turned on by the gyro.
-static void motion_sample(SixAxisState *s) {
+// (0.2.6, GitHub #19) The Controls tab's Motion sensitivity scales what moves (the gyro, and the accelerometer's
+// difference from gravity: a controller's own rumble no longer throws Cappy at 60%, the default). After the game hasn't
+// read the sensors for a while (the death screen, menus, loading) the first 200 ms read at rest: no burst of throws
+// once it reads again. A Joy-Con pair's second Joy-Con (device 1) reads at rest: the same flick reported by both made
+// a spin throw of a normal one.
+static uint64_t motion_quiet_until;
+static void motion_sample(SixAxisState *s, int device) {
     pthread_mutex_lock(&motion_lock);
     motion_sensors_on();
     uint64_t now = plat_now_ns();
+    if (motion_last_ns && now - motion_last_ns > 250000000ull) {  // (not read for a while: start from rest)
+        motion_quiet_until = now + 200000000ull;
+        memcpy(motion_dir, (float[9]){1, 0, 0, 0, 1, 0, 0, 0, 1}, sizeof motion_dir);
+        memset(motion_angle, 0, sizeof motion_angle);
+    }
     double dt = motion_last_ns ? (now - motion_last_ns) / 1e9 : 1.0 / 60;
     if (dt > 0.1) dt = 0.1;
     motion_last_ns = now;
@@ -777,7 +791,18 @@ static void motion_sample(SixAxisState *s) {
         const float k = 1.0f / (2.0f * 3.14159265f);  // (rad/s -> turns/s)
         s->gyro[0] = d[0] * k, s->gyro[1] = -d[2] * k, s->gyro[2] = d[1] * k;
     }
-    if (!menu && (key_shake || pad_shake)) {  // a flick back and forth, every 50 ms, while it is held
+    {   // no gyro on this controller (or none at all): a DSU server's (sc2dsu for the Steam Controller, BetterJoy...)
+        float a[3], g[3];
+        if (!menu && !host_test && !motion_gyro && dsu_motion(a, g)) memcpy(s->acc, a, sizeof a), memcpy(s->gyro, g, sizeof g);
+    }
+    {
+        static float grav[3] = {0, 0, -1};  // (the accelerometer at rest: a slow average - how the controller is held)
+        for (int i = 0; i < 3; i++) grav[i] += (s->acc[i] - grav[i]) * 0.04f;
+        float k = g_settings.motion_sens / 100.0f;
+        if (now < motion_quiet_until || device > 0) k = 0;
+        for (int i = 0; i < 3; i++) s->acc[i] = grav[i] + (s->acc[i] - grav[i]) * k, s->gyro[i] *= k;
+    }
+    if (!menu && (key_shake || pad_shake) && device == 0) {  // a flick back and forth, every 50 ms, while it is held
         bool ph = (now / 50000000ull) & 1;
         s->acc[0] = ph ? 2.5f : -2.5f;
         s->acc[1] = ph ? -1.5f : 1.5f;
@@ -834,6 +859,12 @@ HLE_FUNC("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", hid_sixa
 HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", hid_sixaxis_states) {
     SixAxisState *out = (SixAxisState *)(uintptr_t)c->x[0];
     if ((int)c->x[1] < 1 || !out) { c->x[0] = 0; return; }
-    motion_sample(out);
+    uint32_t handle = *(uint32_t *)(uintptr_t)c->x[2];
+    if ((handle >> 16 & 0xFF) > 0) {  // (a Joy-Con pair's second one: at rest, its own sampling numbers)
+        static int64_t n2;
+        memset(out, 0, sizeof *out);
+        out->delta_ns = 16666667, out->sampling = ++n2, out->acc[2] = -1, out->attr = 1;
+        out->dir[0] = out->dir[4] = out->dir[8] = 1;
+    } else motion_sample(out, 0);
     c->x[0] = 1;
 }

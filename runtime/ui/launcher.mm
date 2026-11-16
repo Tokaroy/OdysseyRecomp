@@ -42,8 +42,10 @@ void *ui_metal_device(void);
 #else
 bool vk_frame_begin(const float clear[4]);
 void vk_frame_end(const char *shot_path);
+void vk_shader_cache_cleanup(void);  // vulkan/shaders.c
 bool vk_prepare_begin(void);          // vulkan/device.c: the shader preparation, in steps
 bool vk_prepare_step(float *frac);
+void vk_prepare_info(int *done, int *total, int *phase, int *stage);
 void vk_prepare_cancel(void);
 void *vk_frame_cmd(void);
 uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);  // nvn/vulkan/imgui_glue.cpp
@@ -320,6 +322,68 @@ static void game_panel_draw(ImFont *f, ImFont *fb, float s) {
     if (back) { g_panel = -2; g_frames = 0; }
 }
 
+#ifndef __APPLE__
+// The shader loading screen (0.2.6): Play makes the game's shaders ready first (vulkan/device.c: the preparation's own
+// process). Over the dimmed launcher: what it's doing, how many, a bar with the percent and the time left. Once after
+// an install, an update or a new graphics driver; a few seconds otherwise.
+static void loading_draw(ImDrawList *dl, ImVec2 D, ImFont *f, ImFont *fb, float s) {
+    int done = 0, total = 0, phase = 0, stage = 0;
+    vk_prepare_info(&done, &total, &phase, &stage);
+    float fr = fminf(1, fmaxf(0, g_start_frac.load()));
+    static Uint64 t0;
+    static float fr0;
+    if (!t0 || fr < fr0) t0 = SDL_GetTicks(), fr0 = fr;
+    dl->AddRectFilled(ImVec2(0, 0), D, IM_COL32(4, 10, 20, 205));
+    float w = fminf(D.x - 64 * s, 820 * s), h = 300 * s, x = (D.x - w) * 0.5f, y = (D.y - h) * 0.5f;
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(16, 38, 58, 250), 22 * s);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(120, 200, 230, 70), 22 * s, 0, 2 * s);
+    float pad = 40 * s, big = fb->FontSize * 1.05f * s, mid = f->FontSize * 0.8f * s, small = f->FontSize * 0.62f * s;
+    // a ring of dots going round
+    ImVec2 c(x + pad + 18 * s, y + pad + big * 0.55f);
+    float t = SDL_GetTicks() / 1000.0f;
+    for (int i = 0; i < 12; i++) {
+        float a = t * 5.0f - i * 0.5236f, k = 1.0f - i / 12.0f;
+        dl->AddCircleFilled(ImVec2(c.x + cosf(a) * 15 * s, c.y + sinf(a) * 15 * s), (2.0f + 2.2f * k) * s,
+                            IM_COL32(150, 220, 245, (int)(60 + 195 * k)));
+    }
+    dl->AddText(fb, big, ImVec2(x + pad + 52 * s, y + pad), IM_COL32(255, 255, 255, 255), "Getting the shaders ready");
+    char what[160], a[24], b[24];
+    auto num = [](char *o, int v) {  // 20069 -> "20,069"
+        if (v >= 1000) snprintf(o, 24, "%d,%03d", v / 1000, v % 1000);
+        else snprintf(o, 24, "%d", v);
+    };
+    num(a, done), num(b, total);
+    if (stage == 1 && phase == 0 && fr < 0.199f)
+        snprintf(what, sizeof what, total ? "Reading the game's shaders: %s of %s" : "Reading the game's shaders", a, b);
+    else if (stage == 1)
+        snprintf(what, sizeof what, total && phase ? "Building them for your graphics card: %s of %s" : "Building them for your graphics card", a, b);
+    else if (stage == 2)
+        snprintf(what, sizeof what, total ? "Shaders from your last play: %s of %s" : "Shaders from your last play", a, b);
+    else snprintf(what, sizeof what, "Starting the game");
+    dl->AddText(f, mid, ImVec2(x + pad, y + pad + big + 26 * s), IM_COL32(205, 228, 240, 255), what);
+    // the bar
+    float by = y + pad + big + 26 * s + mid + 26 * s, bh = 14 * s, bw = w - 2 * pad;
+    dl->AddRectFilled(ImVec2(x + pad, by), ImVec2(x + pad + bw, by + bh), IM_COL32(255, 255, 255, 40), bh * 0.5f);
+    dl->AddRectFilled(ImVec2(x + pad, by), ImVec2(x + pad + bw * fmaxf(fr, 0.015f), by + bh), IM_COL32(110, 215, 245, 255), bh * 0.5f);
+    char pct[64], left[64] = "";
+    snprintf(pct, sizeof pct, "%d%%", (int)(fr * 100 + 0.5f));
+    float el = (SDL_GetTicks() - t0) / 1000.0f;
+    if (fr - fr0 > 0.04f && el > 3) {
+        int rem = (int)(el * (1 - fr) / (fr - fr0) + 0.5f);
+        if (rem >= 90) snprintf(left, sizeof left, "about %d min left", (rem + 30) / 60);
+        else if (rem > 3) snprintf(left, sizeof left, "about %d s left", rem);
+    }
+    dl->AddText(f, mid, ImVec2(x + pad, by + bh + 14 * s), IM_COL32(255, 255, 255, 255), pct);
+    if (left[0]) {
+        float lw = f->CalcTextSizeA(small, FLT_MAX, 0, left).x;
+        dl->AddText(f, small, ImVec2(x + w - pad - lw, by + bh + 14 * s + (mid - small) * 0.5f), IM_COL32(205, 228, 240, 255), left);
+    }
+    const char *note = "Only after installing, an update or a new graphics driver. Then the game starts in seconds.";
+    float nw = f->CalcTextSizeA(small, FLT_MAX, 0, note).x;
+    dl->AddText(f, small, ImVec2(x + (w - nw) * 0.5f, y + h - pad * 0.6f - small), IM_COL32(150, 180, 200, 255), note);
+}
+#endif
+
 static void panel_draw(ImFont *f, ImFont *fb, float s) {
     ImGuiIO &io = ImGui::GetIO();
     float w = fminf(io.DisplaySize.x - 2 * 28 * s, 1760 * s), h = io.DisplaySize.y - 2 * 28 * s;
@@ -483,6 +547,9 @@ void launcher_draw(float scale, void *font_v, void *font_big_v) {
     ImGui::EndDisabled();
     ImGui::PopStyleVar();
     if (panel) dl->AddRectFilled(ImVec2(0, 0), D, IM_COL32(0, 0, 0, 150));
+#ifndef __APPLE__
+    if (starting) loading_draw(dl, D, f, fb, s);
+#endif
     ImGui::PopFont();
     ImGui::End();
     if (panel && g_panel == PANEL_GAME) game_panel_draw(f, fb, s);
@@ -529,6 +596,7 @@ int launcher_run(const char *root) {
     static const char *autoplay = getenv("ODYSSEY_LAUNCHER_PLAY");  // (test) <frame>: Play pressed then
     LOG("[launcher] open\n");
     update_check_start();
+    vk_shader_cache_cleanup();  // (0.2.6: cache/spirv -> cache/shaders.pack)
     menu_launcher_mode(true);
     g_in_loop = true;
     // (test) the player's own keys and controller don't reach a scripted run's launcher (as the game: hle/input.c)

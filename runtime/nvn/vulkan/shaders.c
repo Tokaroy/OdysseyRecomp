@@ -17,41 +17,152 @@ static shaderc_shader_kind kind_of(int stage) {
     return stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
 }
 
-// SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
-// GLSL compile (the driver's pipeline cache only covers the step after this one).
+// SPIR-V disk cache (0.2.6): one file, cache/shaders.pack - records of {"SPK1", key, words, packed size, check} and the
+// module packed with zstd (level 3: ~10x smaller), appended with one write each, so the preparation's processes and the
+// game can add to it at the same time. Before: one file per module in cache/spirv (16,000+ files, 1.9 GB: players'
+// antivirus read every one, and the precompile took minutes on slower PCs). An index in memory (key -> where) is built
+// by reading the record headers once, and again from where it stopped when a key isn't in it (another process may have
+// added it). A record that doesn't check out (a crash mid-write) ends the file's usable part.
+// The key: the stage + GLSL source's hash, so a known shader costs a read instead of a GLSL compile.
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
 
-static uint32_t *cache_load(uint64_t h, size_t *nwords) {
-    char path[64];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint32_t *d = n > 20 && n % 4 == 0 ? malloc((size_t)n) : NULL;
-    if (d && fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); d = NULL; }
+#include <fcntl.h>
+#include <zstd.h>
+#ifdef _WIN32
+#include <io.h>
+#define PK_OPEN(p, fl) _open(p, (fl) | _O_BINARY, 0644)
+#define PK_WRITE _write
+#define PK_CLOSE _close
+#else
+#include <unistd.h>
+#define PK_OPEN(p, fl) open(p, fl, 0644)
+#define PK_WRITE write
+#define PK_CLOSE close
+#endif
+#define PACK_PATH "cache/shaders.pack"
+typedef struct { uint32_t magic; uint32_t words; uint64_t key; uint32_t packed, check; } PackRec;  // 24 bytes
+typedef struct { uint64_t key, off; uint32_t packed, words; } PackEnt;
+static pthread_mutex_t pk_lock = PTHREAD_MUTEX_INITIALIZER;
+static PackEnt *pk_tab;     // (open addressing, key | 1)
+static uint32_t pk_cap, pk_n;
+static uint64_t pk_scanned;  // (bytes of the file read into the index)
+static int pk_fd = -1;       // (appends)
+
+static uint32_t pk_check(const void *d, size_t n) {
+    const uint8_t *b = d;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i += 61) h = (h ^ b[i]) * 16777619u;  // (a sample: enough to tell a torn write)
+    return h ^ (uint32_t)n;
+}
+
+static void pk_put(uint64_t key, uint64_t off, uint32_t packed, uint32_t words) {  // (pk_lock)
+    if ((pk_n + 1) * 2 > pk_cap) {
+        uint32_t nc = pk_cap ? pk_cap * 2 : 1 << 15;
+        PackEnt *t = calloc(nc, sizeof *t);
+        for (uint32_t i = 0; i < pk_cap; i++)
+            if (pk_tab[i].key) {
+                uint32_t j = (uint32_t)(pk_tab[i].key * 0x9E3779B97F4A7C15ull >> 40) & (nc - 1);
+                while (t[j].key) j = (j + 1) & (nc - 1);
+                t[j] = pk_tab[i];
+            }
+        free(pk_tab);
+        pk_tab = t, pk_cap = nc;
+    }
+    key |= 1;
+    uint32_t j = (uint32_t)(key * 0x9E3779B97F4A7C15ull >> 40) & (pk_cap - 1);
+    while (pk_tab[j].key && pk_tab[j].key != key) j = (j + 1) & (pk_cap - 1);
+    if (!pk_tab[j].key) pk_n++;
+    pk_tab[j] = (PackEnt){key, off, packed, words};
+}
+
+static PackEnt *pk_find(uint64_t key) {  // (pk_lock)
+    if (!pk_cap) return NULL;
+    key |= 1;
+    uint32_t j = (uint32_t)(key * 0x9E3779B97F4A7C15ull >> 40) & (pk_cap - 1);
+    while (pk_tab[j].key) { if (pk_tab[j].key == key) return &pk_tab[j]; j = (j + 1) & (pk_cap - 1); }
+    return NULL;
+}
+
+static void pk_scan(void) {  // (pk_lock) the records added since the last look (only whole ones: a write in progress waits)
+    FILE *f = fopen(PACK_PATH, "rb");
+    if (!f) return;
+    fseeko(f, 0, SEEK_END);
+    uint64_t size = (uint64_t)ftello(f), off = pk_scanned;
+    PackRec r;
+    while (off + sizeof r <= size && fseeko(f, (off_t)off, SEEK_SET) == 0 && fread(&r, sizeof r, 1, f) == 1 &&
+           r.magic == 0x314B5053 /* SPK1 */ && r.packed && r.words && off + sizeof r + r.packed <= size) {
+        pk_put(r.key, off + sizeof r, r.packed, r.words);
+        off += sizeof r + r.packed;
+    }
+    pk_scanned = off;
     fclose(f);
-    if (d && d[0] != 0x07230203) { free(d); d = NULL; }
-    if (d) *nwords = (size_t)n / 4;
+}
+
+static uint32_t *cache_load(uint64_t h, size_t *nwords) {
+    pthread_mutex_lock(&pk_lock);
+    PackEnt *e = pk_find(h);
+    if (!e) { pk_scan(); e = pk_find(h); }
+    PackEnt ent = e ? *e : (PackEnt){0};
+    pthread_mutex_unlock(&pk_lock);
+    if (!ent.key) return NULL;
+    void *z = malloc(ent.packed);
+    uint32_t *d = malloc((size_t)ent.words * 4);
+    FILE *f = fopen(PACK_PATH, "rb");
+    bool ok = f && z && d && fseeko(f, (off_t)ent.off, SEEK_SET) == 0 && fread(z, 1, ent.packed, f) == ent.packed;
+    if (f) fclose(f);
+    if (ok) {
+        size_t got = ZSTD_decompress(d, (size_t)ent.words * 4, z, ent.packed);
+        ok = !ZSTD_isError(got) && got == (size_t)ent.words * 4 && d[0] == 0x07230203;
+    }
+    free(z);
+    if (!ok) { free(d); return NULL; }
+    *nwords = ent.words;
     return d;
 }
 
 static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
-    static int made;
-    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
-    char path[64], tmp[80];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
-    snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&made ^ (unsigned long long)(uintptr_t)spv);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return;
-    bool ok = fwrite(spv, 4, nwords, f) == nwords;
-    fclose(f);
-    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+    size_t cap = ZSTD_compressBound(nwords * 4);
+    uint8_t *buf = malloc(sizeof(PackRec) + cap);
+    if (!buf) return;
+    size_t packed = ZSTD_compress(buf + sizeof(PackRec), cap, spv, nwords * 4, 3);
+    if (ZSTD_isError(packed)) { free(buf); return; }
+    PackRec r = {0x314B5053, (uint32_t)nwords, h, (uint32_t)packed, 0};
+    r.check = pk_check(buf + sizeof(PackRec), packed);
+    memcpy(buf, &r, sizeof r);
+    pthread_mutex_lock(&pk_lock);
+    if (pk_fd < 0) { mkdir("cache", 0755); pk_fd = PK_OPEN(PACK_PATH, O_WRONLY | O_CREAT | O_APPEND); }
+    if (pk_fd >= 0) PK_WRITE(pk_fd, buf, (unsigned)(sizeof(PackRec) + packed));  // (one write: an atomic append; a later
+                                                                                     // record of a key wins at the next scan)
+    pthread_mutex_unlock(&pk_lock);
+    free(buf);  // (the index learns it at the next scan: its offset is the file's, not ours)
+}
+
+// The old caches (0.2.5 and before): one file per module in cache/spirv, and every program's binaries in cache/pbin
+// (up to 3 GB, 36,000 files). Renamed at once - the preparation that follows makes the new ones without meeting them -
+// and removed in the background. Only once: cache/spirv tells an older version's cache.
+static void *old_cache_rm(void *a) {
+    (void)a;
+    extern bool plat_remove_tree(const char *dir);
+    plat_remove_tree("cache/old-spirv");
+    plat_remove_tree("cache/old-pbin");
+    return NULL;
+}
+void vk_shader_cache_cleanup(void) {
+    struct stat st;
+    bool old = stat("cache/spirv", &st) == 0;
+    if (old) {
+        rename("cache/spirv", "cache/old-spirv");
+        if (stat("cache/pbin", &st) == 0) rename("cache/pbin", "cache/old-pbin");
+        remove("cache/precompiled");  // (the preparation runs again: the drawn ones, ~20 s)
+    }
+    if (old || stat("cache/old-spirv", &st) == 0 || stat("cache/old-pbin", &st) == 0) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, old_cache_rm, NULL) == 0) pthread_detach(t);
+    }
 }
 
 // Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth

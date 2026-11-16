@@ -10,6 +10,7 @@ void vk_shaders_init(void);
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords);  // malloc'd, NULL on error
 extern __thread uint64_t vk_spirv_last_key;  // (the last vk_glsl_to_spirv on this thread: the hash of its source)
 uint32_t *vk_spirv_by_key(uint64_t key, size_t *nwords);  // from the disk cache by that key (malloc'd), NULL if not there
+void vk_shader_cache_cleanup(void);  // (game process, once) the old cache/spirv folder removed in the background
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords);
 // Descriptor bindings declared by a SPIR-V module.
 int vk_reflect(const uint32_t *spv, size_t nwords, VkBindingInfo *out, int max);

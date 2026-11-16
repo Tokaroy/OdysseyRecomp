@@ -112,7 +112,15 @@ static void pick_device(void) {
     // An integrated GPU (Intel Iris Xe / UHD / Arc iGPUs, AMD Vega / Radeon iGPUs, handhelds) shares the PC's memory and
     // has a fraction of a graphics card's speed: unless an Internal resolution was chosen, 1080p rather than 1440p
     // (an Iris Xe ran out of graphics memory at a cutscene's start: GitHub #9).
-    if (g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && !g_settings.res_chosen && g_settings.res_mode != 1) {
+    // The Steam Deck (its APU: "AMD Custom GPU 0405" / "0932", RADV "VANGOGH"; SteamOS sets SteamDeck=1): 720p, as its
+    // 800p screen shows it (0.2.6: "runs really bad on steam deck" - 13-55 fps at 1080p)
+    const char *dn = g_vk.props.deviceName;
+    bool deck = (getenv("SteamDeck") && atoi(getenv("SteamDeck"))) || strstr(dn, "Custom GPU 0405") || strstr(dn, "Custom GPU 0932") ||
+                strstr(dn, "VANGOGH") || strstr(dn, "Van Gogh");
+    if (deck && !g_settings.res_chosen && g_settings.res_mode != RES_720) {
+        g_settings.res_mode = RES_720;
+        LOG("[vk] Steam Deck: Internal resolution 720p (not chosen in the settings)\n");
+    } else if (g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && !g_settings.res_chosen && g_settings.res_mode != 1) {
         g_settings.res_mode = 1;
         LOG("[vk] integrated GPU: Internal resolution 1080p (not chosen in the settings)\n");
     }
@@ -752,6 +760,25 @@ static float display_hz(void) {
     return m ? m->refresh_rate : 0;
 }
 
+// Images per game frame (0.2.6, Video tab "Frame rate"): 60 -> 1, 120 -> 2, 180 -> 3, 240 -> 4, Match display -> as many
+// as the display shows; never more than its refresh rate allows (144 / 165 Hz: 2). ODYSSEY_INTERP=on: what was chosen.
+static int interp_cap_dyn = 4;  // (lowered by the brake: present_brake)
+static int interp_images(void) {
+    int r = g_settings.frame_rate, n = r ? r / 60 : 4;
+    if (n > interp_cap_dyn) n = interp_cap_dyn;
+    double hz = display_hz();
+    int cap = hz > 0 ? (int)(hz / 60.0 + 0.15) : 2;
+    const char *e = getenv("ODYSSEY_INTERP");
+    if (n > cap && !(e && !strcmp(e, "on"))) n = cap;
+    return n < 2 ? 2 : n > 4 ? 4 : n;  // (this thread runs only with interpolation on: at least one in-between)
+}
+static bool interp_step_down(void) {
+    int n = interp_images();
+    if (n <= 2) return false;
+    interp_cap_dyn = n - 1;
+    return true;
+}
+
 // The presenter: shows queued images at their times, in order. They are window images composed ahead (compose: the
 // game's image placed, post-processed and letterboxed at the window's size, as a present draws it), which the presenter
 // copies into the swapchain's and presents with command buffers of its own (present_fast) - without the render lock,
@@ -1085,7 +1112,20 @@ static void *interp_thread(void *arg) {
             bool behind = blend && !shot && prev_end && vk_completed_seq() < prev_end;
             nbehind += behind;
             nrest += j.rest;
-            if (blend && !waited && !behind && !j.rest && interp_replays_allowed(j.frame, total_frames) && interp_prepare(0.5f) && interp_replay_lock()) {
+            // (0.2.6) Frame rate 120 / 180 / 240 / Match display: 1-3 in-betweens, each the frame drawn again with the
+            // game's state blended at its moment (t = k / n); one the GPU can't make in time is left out
+            int ncfg = interp_images(), nimg = blend && !waited && !behind && !j.rest && interp_replays_allowed(j.frame, total_frames) ? ncfg : 1;
+            TexBackend *mk[4];
+            float mt[4];
+            int nm = 0;
+            bool replayed = false;
+            uint64_t frame_prev_end = prev_end;  // (the GPU still on the frame before this one: fewer in-betweens now)
+            for (int k = 1; k < nimg; k++) {
+            if (k > 1 && !shot && frame_prev_end && vk_completed_seq() < frame_prev_end) break;
+            float t = (float)k / (float)nimg;
+            if (!(interp_prepare(t) && interp_replay_lock())) break;
+            {
+                replayed = true;
                 extern uint32_t g_interp_replay_epoch;
                 g_interp_replay_epoch = j.epoch;
                 // ODYSSEY_INTERP_DEBUG=<n> (research): the replay making the in-between before frame n runs as a debug
@@ -1102,9 +1142,9 @@ static void *interp_thread(void *arg) {
                 vk_render_lock();
                 extern TexBackend *vk_tex_replayed(NvnTexture *t);
                 TexBackend *b = vk_tex_replayed(j.t);  // (textures.c: the replay drew into a twin of the window image)
-                static TexBackend mids[3];
+                static TexBackend mids[12];
                 static int mi;
-                mid = &mids[mi = (mi + 1) % 3];
+                mid = &mids[mi = (mi + 1) % 12];
                 extern volatile long g_f9_shot;  // (F9: the in-between of that frame too, build/frames/f9_<n>_mid.png)
                 if (g_f9_shot && (long)j.frame + 1 == g_f9_shot) {
                     char path[256];
@@ -1119,11 +1159,13 @@ static void *interp_thread(void *arg) {
                     snprintf(path, sizeof path, "build/frames/frame_%05llu_mid.png", (unsigned long long)j.frame + 1);
                     renderer_save_texture_tex(b, path);
                 }
-                if (!compose(mid, b, j.v, j.pv)) mid = NULL;
+                if (compose(mid, b, j.v, j.pv)) mk[nm] = mid, mt[nm++] = t;
                 vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);  // (the GPU starts on it)
                 prev_end = vk_pending_seq() - 1;
                 vk_render_unlock();
-            } else {
+            }
+            }
+            if (!replayed) {
                 renderer_submit();  // (the game image's compose: on the GPU before the presenter's copy of it)
                 prev_end = vk_pending_seq() - 1;
             }
@@ -1139,9 +1181,11 @@ static void *interp_thread(void *arg) {
             if (want > 14e6) want = 14e6;
             delay = want > delay ? want : delay - fmin(delay - want, 0.05e6);
             int64_t due = (int64_t)j.at + (int64_t)delay;
-            uint64_t order = 2 * (j.frame + 1);
-            if (mid) presenter_queue(mid, (uint64_t)due, order - 1, "in-between");
-            presenter_queue(j.game, (uint64_t)(due + (int64_t)(j.period / 2)), order, "game image");
+            uint64_t order = 8 * (j.frame + 1);
+            double first = ncfg >= 2 ? 1.0 / ncfg : 0.5;  // (the first in-between's moment: shown at due)
+            for (int i = 0; i < nm; i++)
+                presenter_queue(mk[i], (uint64_t)(due + (int64_t)(j.period * (mt[i] - first))), order - 7 + (uint64_t)(mt[i] * 6), "in-between");
+            presenter_queue(j.game, (uint64_t)(due + (int64_t)(j.period * (1 - first))), order, "game image");
         }
         interp_frame_rotate();
         interp_log_stats();
@@ -1304,7 +1348,12 @@ static void present_brake(uint64_t now, bool interp) {
             int k = n++ % 120;
             nslow += (d > 20e6) - slow[k];  // (20: three 165 Hz refreshes, 18.2 ms, are no miss)
             slow[k] = d > 20e6;
-            if (nslow >= 12) {
+            if (nslow >= 12 && interp_step_down()) {  // (0.2.6: 240 -> 180 -> 120 first: fewer in-betweens a frame)
+                LOG("[interp] the game missed its vsync in %d of its last %d frames: %d images a game frame from now\n",
+                    nslow, n < 120 ? n : 120, interp_images());
+                memset(slow, 0, sizeof slow);
+                n = nslow = 0;
+            } else if (nslow >= 12) {
                 brake_until = total_frames + (uint64_t)backoff;
                 LOG("[interp] the game missed its vsync in %d of its last %d frames with in-betweens: paused for %d frames\n",
                     nslow, n < 120 ? n : 120, backoff);
@@ -1714,6 +1763,11 @@ bool vk_prepare_step(float *frac) {
     }
     if (frac) *frac = pp.frac;
     return pp.stage == 0 || pp.stage == 3;
+}
+
+// What the preparation is doing, for the launcher's loading screen (read while it runs: plain ints)
+void vk_prepare_info(int *done, int *total, int *phase, int *stage) {
+    *done = pp.done, *total = pp.total, *phase = pp.phase, *stage = pp.stage;
 }
 
 // The wait given up (the window closed): the process is stopped; what it saved stays, the next start goes on from it.

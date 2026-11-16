@@ -119,7 +119,7 @@ D=$XW/deps/lib
 APPINC="-isystem $XW/deps/include -isystem $S/usr/include"  # (our Vulkan headers before Ubuntu 22.04's older ones)
 rm -f build/linux-x/OdysseyRecomp
 make PLATFORM=linux ARCH=x86_64 HOSTARCH=x86_64 B=build/linux-x CC="$X/bin/zcc $APPINC" CXX="$X/bin/zcxx $APPINC" DEPS="$XW/deps" \
-    LDFLAGS="-fuse-ld=lld -rdynamic $D/libSDL3.so $D/libavformat.so $D/libavcodec.so $D/libavutil.so $D/libswscale.so $S/usr/lib/x86_64-linux-gnu/libvulkan.so.1 $D/libshaderc_shared.so -lpthread -ldl -lm -Wl,-rpath,XORIGIN/../lib" \
+    LDFLAGS="-fuse-ld=lld -rdynamic $D/libSDL3.so $D/libavformat.so $D/libavcodec.so $D/libavutil.so $D/libswscale.so $S/usr/lib/x86_64-linux-gnu/libvulkan.so.1 $D/libshaderc_shared.so $S/usr/lib/x86_64-linux-gnu/libzstd.a -lpthread -ldl -lm -Wl,-rpath,XORIGIN/../lib" \
     -j16 build/linux-x/OdysseyRecomp
 "$PY" -c "
 p='build/linux-x/OdysseyRecomp'; d=open(p,'rb').read(); assert d.count(b'XORIGIN/../lib') == 1

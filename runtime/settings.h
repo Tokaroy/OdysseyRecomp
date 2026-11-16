@@ -33,7 +33,8 @@ typedef struct {
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int aspect;          // ASPECT_*: the image in a window wider than 16:9
-    bool frame_interp;   // images between the game's frames (Vulkan: runtime/nvn/interp.c)
+    bool frame_interp;   // images between the game's frames (Vulkan: runtime/nvn/interp.c): frame_rate above 60
+    int frame_rate;      // (0.2.6) 60, 120, 180, 240; 0: as many as the display shows (up to 240)
     bool deband;         // smooth gradients: the game's final picture in half floats, dithered into the window (Vulkan:
                          // nvn/vulkan/textures.c vk_deband)
     float volume;        // master volume, 1 = 100%
@@ -52,6 +53,9 @@ typedef struct {
     float saturation;    // 1 = as the game, 0 = grey
     bool mouse_camera;   // the mouse turns the camera once captured (runtime/hle/input.c)
     int mouse_sens;      // percent
+    bool dsu;            // motion from a DSU (cemuhook) server: runtime/hle/dsu.c
+    char dsu_server[64]; // host:port
+    int motion_sens;     // percent (0.2.6: how strongly the controller's motion reaches the game; 0 = off)
     bool mouse_invert_y;
 } Settings;
 // SHARPEN_AUTO: High while FSR 1 scales the image up, none at the display's own resolution (the look before the setting)

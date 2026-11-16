@@ -30,6 +30,9 @@ Settings g_settings = {
     .brightness = 1.0f,
     .mouse_camera = true,
     .mouse_sens = 100,
+    .frame_rate = 60,
+    .motion_sens = 60,
+    .dsu = true,
     .saturation = 1.0f,
 };
 
@@ -114,6 +117,9 @@ void settings_load(void) {
         if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "borderless")) g_settings.borderless = atoi(val) != 0;
         else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
+        else if (!strcmp(key, "dsu")) g_settings.dsu = atoi(val) != 0;
+        else if (!strcmp(key, "dsu_server")) snprintf(g_settings.dsu_server, sizeof g_settings.dsu_server, "%s", val);
+        else if (!strcmp(key, "motion_sensitivity")) g_settings.motion_sens = atoi(val) < 0 ? 0 : atoi(val) > 200 ? 200 : atoi(val);
         else if (!strcmp(key, "mouse_sensitivity")) g_settings.mouse_sens = atoi(val) < 10 ? 10 : atoi(val) > 1000 ? 1000 : atoi(val);
         else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
         else if (!strcmp(key, "mod_off")) settings_set_mod_off(val, true);
@@ -133,15 +139,21 @@ void settings_load(void) {
             else if (!strcasecmp(val, "8k")) n = 4;
             // (update 43: fixed sizes only - an older ini's match / dynamic become 1440p, its shares 1080p / 720p)
             // (720p / 900p were in update 43's list and taken out again: 1080p, the smallest now)
-            g_settings.res_mode = !strcasecmp(val, "1440p") ? RES_1440 : !strcasecmp(val, "5k") ? RES_5K :
-                                  (!strcasecmp(val, "720p") || !strcasecmp(val, "900p") || strchr(val, '%')) ? 1 :
+            // (0.2.6: 720p is back, for handhelds)
+            g_settings.res_mode = !strcasecmp(val, "1440p") ? RES_1440 : !strcasecmp(val, "5k") ? RES_5K : !strcasecmp(val, "720p") ? RES_720 :
+                                  (!strcasecmp(val, "900p") || strchr(val, '%')) ? 1 :
                                   (n >= 1 && n <= 4) ? n : RES_DEFAULT;
         }
         else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;
         else if (!strcmp(key, "deband")) g_settings.deband = atoi(val) != 0;
         else if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "fill") ? ASPECT_FILL : ASPECT_16_9;
-        else if (!strcmp(key, "frame_interp")) g_settings.frame_interp = atoi(val) != 0;
+        else if (!strcmp(key, "frame_interp")) { g_settings.frame_interp = atoi(val) != 0; if (g_settings.frame_interp && g_settings.frame_rate == 60) g_settings.frame_rate = 120; }
+        else if (!strcmp(key, "frame_rate")) {
+            int r = atoi(val);
+            g_settings.frame_rate = r == 0 || r == 120 || r == 180 || r == 240 ? r : 60;
+            g_settings.frame_interp = g_settings.frame_rate != 60;
+        }
         else if (!strcmp(key, "anisotropic")) {
             int a = !strcmp(val, "game") ? 0 : atoi(val);
             g_settings.aniso = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
@@ -180,6 +192,9 @@ void settings_save(void) {
     fprintf(f, "borderless = %d%c", g_settings.borderless, 10);
     fprintf(f, "mouse_camera = %d%c", g_settings.mouse_camera, 10);
     fprintf(f, "mouse_sensitivity = %d%c", g_settings.mouse_sens, 10);
+    fprintf(f, "motion_sensitivity = %d%c", g_settings.motion_sens, 10);
+    fprintf(f, "dsu = %d%c", g_settings.dsu ? 1 : 0, 10);
+    if (g_settings.dsu_server[0]) fprintf(f, "dsu_server = %s%c", g_settings.dsu_server, 10);
     fprintf(f, "mouse_invert_y = %d%c", g_settings.mouse_invert_y, 10);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
     fprintf(f, "reverb = %d\n", g_settings.reverb);
@@ -192,6 +207,7 @@ void settings_save(void) {
     fprintf(f, "deband = %d\n", g_settings.deband);
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_FILL ? "fill" : "16:9");
     fprintf(f, "frame_interp = %d\n", g_settings.frame_interp);
+    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
     if (g_settings.aniso) fprintf(f, "anisotropic = %d\n", g_settings.aniso);
     else fprintf(f, "anisotropic = game\n");
     static const char *const sh[] = {"off", "low", "medium", "high", "auto"};

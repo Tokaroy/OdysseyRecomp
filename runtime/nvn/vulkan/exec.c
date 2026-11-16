@@ -3217,7 +3217,7 @@ static const char *const PC_FILES[] = {
     "ShaderData/alShadowMaskShader.szs", "ShaderData/alStaticDepthShadowShader.szs", "ShaderData/alTemporalShader.szs",
     "ShaderData/alThunderShader.szs", "ShaderData/alVignettingShader.szs", "SystemData/AglResource.szs"};
 #define PC_ARCHIVES "the game's shader archives"
-typedef struct { const uint8_t *code[2]; uint32_t cmax[2]; } PcProg;
+typedef struct { const uint8_t *code[2]; uint32_t cmax[2]; bool known; } PcProg;  // (known: drawn before)
 static PcProg *pc_progs;
 static int pc_n, pc_cap;
 static _Atomic int pc_next, pc_done, pc_items_n;
@@ -3245,7 +3245,7 @@ static bool pc_stage(const uint8_t *bn, size_t size, uint64_t cs, const uint8_t 
 
 typedef struct { const uint8_t *p; uint32_t len, hlen; } PcBlob;
 static int pc_agl_progs, pc_paired_progs;
-static bool pc_add_unique(uint64_t *seen, const uint8_t *vs, uint32_t vmax, const uint8_t *fs, uint32_t fmax) {
+static bool pc_add_unique(uint64_t *seen, const uint8_t *vs, uint32_t vmax, const uint8_t *fs, uint32_t fmax, bool known) {
     enum { SB = 16 };
     uint64_t key = ((uint64_t)(uintptr_t)vs * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)fs) | 1;
     uint32_t h = (uint32_t)(key >> (64 - SB));
@@ -3254,7 +3254,7 @@ static bool pc_add_unique(uint64_t *seen, const uint8_t *vs, uint32_t vmax, cons
         if (!seen[h]) { seen[h] = key; break; }
     }
     if (pc_n == pc_cap) pc_progs = realloc(pc_progs, sizeof *pc_progs * (size_t)(pc_cap = pc_cap ? pc_cap * 2 : 4096));
-    pc_progs[pc_n++] = (PcProg){{vs, fs}, {vmax, fmax}};
+    pc_progs[pc_n++] = (PcProg){{vs, fs}, {vmax, fmax}, known};
     return true;
 }
 static void pc_blob_add(PcBlob **l, int *n, const uint8_t *p, uint32_t len, uint32_t hlen) {
@@ -3301,7 +3301,10 @@ static void pc_scan_bnsh(const uint8_t *bn, size_t size) {
         bool hv = pc_stage(bn, size, st[0], &vc, &vm, &vh), hf = pc_stage(bn, size, st[4], &fc, &fm, &fh);
         if (hf) pc_blob_add(&fall, &nfa, fc, fm, fh);
         if (hv) pc_blob_add(&vlone, &nvl, vc, vm, vh);
-        if (hv && hf) pc_add_unique(seen, vc, vm, fc, fm);
+        if (hv && hf) {  // (drawn before? hashed as a draw hashes it: vh / fh bytes)
+            bool warm;
+            pc_add_unique(seen, vc, vm, fc, fm, drawn_has(hash_words(hash_words(0x9e3779b97f4a7c15ull, vc, vh), fc, fh) | 1, &warm));
+        }
     }
     nvl = pc_blob_unique(vlone, nvl);
     nfa = pc_blob_unique(fall, nfa);
@@ -3311,7 +3314,7 @@ static void pc_scan_bnsh(const uint8_t *bn, size_t size) {
             for (int f = 0; f < nfa; f++) {
                 bool warm;
                 if (drawn_has(hash_words(hvv, fall[f].p, fall[f].hlen) | 1, &warm) &&
-                    pc_add_unique(seen, vlone[v].p, vlone[v].len, fall[f].p, fall[f].len))
+                    pc_add_unique(seen, vlone[v].p, vlone[v].len, fall[f].p, fall[f].len, true))
                     pc_paired_progs++;
             }
         }
@@ -3365,7 +3368,7 @@ static void pc_match_blocks(const uint8_t *sb, uint64_t from, uint64_t to, int *
                     bool warm;
                     if (!drawn_has(h, &warm)) continue;
                     if (pc_n == pc_cap) pc_progs = realloc(pc_progs, sizeof *pc_progs * (size_t)(pc_cap = pc_cap ? pc_cap * 2 : 4096));
-                    pc_progs[pc_n++] = (PcProg){{vs[v].p, fs[f].p}, {vs[v].len, fs[f].len}};
+                    pc_progs[pc_n++] = (PcProg){{vs[v].p, fs[f].p}, {vs[v].len, fs[f].len}, true};
                     (*count)++;
                     cf = 3;  // (one end matched)
                 }
@@ -3381,6 +3384,9 @@ static void pc_scan_sharcb(const uint8_t *sb, size_t size) {
     pc_match_blocks(sb, co, co + csz, &pc_agl_progs);
 }
 
+static int pc_all = -1;
+static bool pc_known(const PcProg *pp) { return pp->known; }
+
 static void *pc_worker(void *arg) {
     (void)arg;
     ShaderKey vkey, fkey;
@@ -3393,6 +3399,7 @@ static void *pc_worker(void *arg) {
     if (lim < 0) lim = getenv("ODYSSEY_HUGE_SHADER") ? atol(getenv("ODYSSEY_HUGE_SHADER")) : 1536 * 1024;
     for (int i; (i = atomic_fetch_add(&pc_next, 1)) < pc_n; atomic_fetch_add(&pc_done, 1)) {
         const PcProg *pp = &pc_progs[i];
+        if (!pc_all && !pp->known) continue;  // (0.2.6: only what the game draws - the rest when it sets it up)
         ShaderKey fk = fkey;
         ShaderInfo *vi = maxwell_translate(pp->code[0], pp->cmax[0], STAGE_VERTEX, &vkey), *fi = NULL;
         if (vi && vi->msl) {
@@ -3406,7 +3413,11 @@ static void *pc_worker(void *arg) {
             uint64_t kv = vk_spirv_last_key;
             uint32_t *sf = sv ? vk_glsl_to_spirv(fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
             uint64_t kf = vk_spirv_last_key;
-            if (sv && sf) pc_items[atomic_fetch_add(&pc_items_n, 1)] = (PrepItem){{kv, kf}};
+            // (0.2.6) every program's SPIR-V is made and packed (cache/shaders.pack), but the driver compiles - minutes
+            // on slower PCs, a binary each - only the ones the game draws: the shipped list from a run through all 197
+            // stages and this player's own (drawn_has). The rest (variations nothing draws) compile if ever drawn.
+            // ODYSSEY_PRECOMPILE_ALL=1: all of them, as 0.2.5 did.
+            if (sv && sf && (pc_all || pc_known(pp))) pc_items[atomic_fetch_add(&pc_items_n, 1)] = (PrepItem){{kv, kf}};
             free(sv);
             free(sf);
         }
@@ -3450,6 +3461,7 @@ static bool precompile_collect(const char *out, int nt) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     pthread_t th[16];
+    if (pc_all < 0) pc_all = getenv("ODYSSEY_PRECOMPILE_ALL") && atoi(getenv("ODYSSEY_PRECOMPILE_ALL"));
     for (int i = 0; i < nt; i++) pthread_create(&th[i], NULL, pc_worker, NULL);
     for (int last = -1; atomic_load(&pc_done) < pc_n; SDL_Delay(100)) {
         int dn = atomic_load(&pc_done);
@@ -3462,7 +3474,8 @@ static bool precompile_collect(const char *out, int nt) {
     bool ok = f && fwrite(pc_items, sizeof *pc_items, (size_t)ni, f) == (size_t)ni;
     if (f) ok = fclose(f) == 0 && ok;
     if (ok) { remove(out); ok = rename("cache/precompile.list.tmp", out) == 0; }
-    LOG("[precompile] %d of %d programs translated on %d threads in %.1f s\n", ni, pc_n, nt, (plat_now_ns() - t0) / 1e9);
+    LOG("[precompile] %d programs translated on %d threads in %.1f s, %d of them drawn before: compiled\n", pc_n, nt,
+        (plat_now_ns() - t0) / 1e9, ni);
     free(pc_items);
     free(pc_progs);
     free(d);

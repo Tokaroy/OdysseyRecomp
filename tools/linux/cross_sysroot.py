@@ -25,6 +25,8 @@ PKGS = [
     'libdecor-0-dev', 'libwayland-dev', 'wayland-protocols', 'libibus-1.0-dev',
     # Vulkan: the headers come from Vulkan-Headers; the loader to link against (libvulkan.so.1)
     'libvulkan-dev', 'libvulkan1',
+    # zstd (0.2.6: the shader pack, runtime/nvn/vulkan/shaders.c)
+    'libzstd-dev', 'libzstd1',
     # the libraries the -dev packages' .so links point at (SDL finds their sonames; the app links against libvulkan)
     'libx11-6', 'libxext6', 'libxrandr2', 'libxrender1', 'libxcursor1', 'libxi6', 'libxfixes3', 'libxss1', 'libxtst6',
     'libxkbcommon0', 'libxcb1', 'libxau6', 'libxdmcp6', 'libasound2', 'libpulse0', 'libpipewire-0.3-0',
@@ -97,7 +99,7 @@ def main():
     root = sys.argv[1]
     os.makedirs(root, exist_ok=True)
     pk = index()
-    for p in PKGS:
+    for p in (sys.argv[2:] or PKGS):  # (named packages: added to a sysroot made before)
         f = pk.get(p)
         if not f:
             print('missing', p)

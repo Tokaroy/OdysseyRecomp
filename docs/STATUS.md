@@ -1,4 +1,4 @@
-# Status (update 54 / 0.2.5, 2026-11-15)
+# Status (update 55 / 0.2.6, 2026-11-16)
 
 Current state only. The investigations behind each item are in `docs/notes/`.
 
@@ -48,6 +48,12 @@ through on it at 60 fps.
 - A crash inside the Vulkan driver switches that driver to whole pipelines from the next start (GitHub #14; not tried
   on the ROG Ally).
 - Updates download by themselves in the launcher and install with one click, Windows and Linux (Linux not run here).
+
+- Shaders (update 55): one packed cache (cache/shaders.pack), only drawn programs prepared at Play behind a loading
+  screen: 20.7 s and 453 MB instead of 91 s and 3.1 GB, the same in play (`notes/update-0.2.6-2026-11-16.md`).
+- Frame rate 120 / 180 / 240 / Match display (replayed frames, capped by the display); motion sensitivity, DSU motion,
+  Joy-Con pair and death-screen fixes; 720p default on the Steam Deck. Not tried on a fast display, a Deck or real
+  motion controllers.
 
 ## Known problems
 

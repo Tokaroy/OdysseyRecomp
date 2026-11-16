@@ -6,28 +6,67 @@
   "game": {
     "kind": "folder",
     "label": "Your own extracted Super Mario Odyssey, version 1.0.0 without updates: the folder that holds its exefs and romfs folders.",
-    "check": { "nup_build_id": "3ca12dfaaf9c82da" }
+    "check": {
+      "nup_build_id": "3ca12dfaaf9c82da"
+    }
   },
   "prepare": {
-    "program": ["OdysseyRecomp.exe", "OdysseyRecomp.sh"],
-    "args": ["--setup", "{game}"],
+    "program": [
+      "OdysseyRecomp.exe",
+      "OdysseyRecomp.sh"
+    ],
+    "args": [
+      "--setup",
+      "{game}"
+    ],
     "label": "Copying your game files and building the game code (a few minutes, once)",
     "timeout": 3600
   },
   "start": {
-    "program": ["OdysseyRecomp.exe", "OdysseyRecomp.sh"]
+    "program": [
+      "OdysseyRecomp.exe",
+      "OdysseyRecomp.sh"
+    ]
   },
-  "saves": ["{install}/save", "{install}/odyssey.ini"],
+  "saves": [
+    "{install}/save",
+    "{install}/odyssey.ini"
+  ],
   "folders": {
-    "saves": [{ "path": "{install}/save" }],
-    "logs": [{ "path": "{install}" }],
-    "mods": [{ "path": "{install}/mods" }]
+    "saves": [
+      {
+        "path": "{install}/save"
+      }
+    ],
+    "logs": [
+      {
+        "path": "{install}"
+      }
+    ],
+    "mods": [
+      {
+        "path": "{install}/mods"
+      }
+    ]
   },
   "actions": [
-    { "id": "mods", "label": "Open the mods folder", "help": "RomFS mods, each in a folder of its own. Switch them on and off in the game's menu (Esc).", "open": "mods" }
+    {
+      "id": "mods",
+      "label": "Open the mods folder",
+      "help": "RomFS mods, each in a folder of its own. Switch them on and off in the game's menu (Esc).",
+      "open": "mods"
+    }
   ],
   "config": [
-    { "id": "main", "format": "ini", "file": [{ "path": "{install}/odyssey.ini" }] }
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        {
+          "path": "{install}/odyssey.ini"
+        }
+      ]
+    }
   ],
   "settings": [
     {
@@ -36,36 +75,131 @@
       "help": "What the game draws at, then scaled to your screen. Higher is sharper and needs a faster GPU.",
       "group": "Display",
       "choices": [
-        { "label": "1080p", "set": { "resolution": "1080p" } },
-        { "label": "1440p", "set": { "resolution": "1440p" } },
-        { "label": "4K", "set": { "resolution": "4k" } },
-        { "label": "5K", "set": { "resolution": "5k" } },
-        { "label": "6K", "set": { "resolution": "6k" } },
-        { "label": "8K", "set": { "resolution": "8k" } }
+        {
+          "label": "720p (handhelds)",
+          "set": {
+            "resolution": "720p"
+          }
+        },
+        {
+          "label": "1080p",
+          "set": {
+            "resolution": "1080p"
+          }
+        },
+        {
+          "label": "1440p",
+          "set": {
+            "resolution": "1440p"
+          }
+        },
+        {
+          "label": "4K",
+          "set": {
+            "resolution": "4k"
+          }
+        },
+        {
+          "label": "5K",
+          "set": {
+            "resolution": "5k"
+          }
+        },
+        {
+          "label": "6K",
+          "set": {
+            "resolution": "6k"
+          }
+        },
+        {
+          "label": "8K",
+          "set": {
+            "resolution": "8k"
+          }
+        }
       ],
-      "defaults": { "resolution": "1440p" }
+      "defaults": {
+        "resolution": "1440p"
+      }
     },
     {
-      "id": "frame_interp",
-      "label": "Frame limiter",
-      "help": "120 fps adds an image between each two of the game's frames. Needs a 120 Hz or faster display.",
+      "id": "frame_rate",
+      "label": "Frame rate",
+      "help": "60 fps is the game's own. 120 / 180 / 240 draw extra frames between the game's own from its state at that moment. Match display: as many as your display shows. Needs a display that fast.",
       "group": "Display",
       "choices": [
-        { "label": "60 fps", "set": { "frame_interp": "0" } },
-        { "label": "120 fps", "set": { "frame_interp": "1" } }
+        {
+          "label": "60 fps",
+          "set": {
+            "frame_rate": "60",
+            "frame_interp": "0"
+          }
+        },
+        {
+          "label": "120 fps",
+          "set": {
+            "frame_rate": "120",
+            "frame_interp": "1"
+          }
+        },
+        {
+          "label": "180 fps",
+          "set": {
+            "frame_rate": "180",
+            "frame_interp": "1"
+          }
+        },
+        {
+          "label": "240 fps",
+          "set": {
+            "frame_rate": "240",
+            "frame_interp": "1"
+          }
+        },
+        {
+          "label": "Match display",
+          "set": {
+            "frame_rate": "0",
+            "frame_interp": "1"
+          }
+        }
       ],
-      "defaults": { "frame_interp": "0" }
+      "defaults": {
+        "frame_rate": "60",
+        "frame_interp": "0"
+      }
     },
     {
       "id": "window",
       "label": "Display mode",
       "group": "Display",
       "choices": [
-        { "label": "Window", "set": { "fullscreen": "0", "borderless": "0" } },
-        { "label": "Borderless", "set": { "fullscreen": "0", "borderless": "1" } },
-        { "label": "Fullscreen", "set": { "fullscreen": "1", "borderless": "0" } }
+        {
+          "label": "Window",
+          "set": {
+            "fullscreen": "0",
+            "borderless": "0"
+          }
+        },
+        {
+          "label": "Borderless",
+          "set": {
+            "fullscreen": "0",
+            "borderless": "1"
+          }
+        },
+        {
+          "label": "Fullscreen",
+          "set": {
+            "fullscreen": "1",
+            "borderless": "0"
+          }
+        }
       ],
-      "defaults": { "fullscreen": "0", "borderless": "0" }
+      "defaults": {
+        "fullscreen": "0",
+        "borderless": "0"
+      }
     },
     {
       "id": "aspect",
@@ -73,10 +207,22 @@
       "help": "Fill window shows more of the world on ultrawide screens.",
       "group": "Display",
       "choices": [
-        { "label": "16:9", "set": { "aspect": "16:9" } },
-        { "label": "Fill window", "set": { "aspect": "fill" } }
+        {
+          "label": "16:9",
+          "set": {
+            "aspect": "16:9"
+          }
+        },
+        {
+          "label": "Fill window",
+          "set": {
+            "aspect": "fill"
+          }
+        }
       ],
-      "defaults": { "aspect": "16:9" }
+      "defaults": {
+        "aspect": "16:9"
+      }
     },
     {
       "id": "upscaler",
@@ -84,30 +230,135 @@
       "help": "How the picture is scaled to your screen. AMD FSR 1 works on any GPU.",
       "group": "Image",
       "choices": [
-        { "label": "AMD FSR 1", "set": { "upscaler": "fsr1" } },
-        { "label": "Bilinear", "set": { "upscaler": "bilinear" } }
+        {
+          "label": "AMD FSR 1",
+          "set": {
+            "upscaler": "fsr1"
+          }
+        },
+        {
+          "label": "Bilinear",
+          "set": {
+            "upscaler": "bilinear"
+          }
+        }
       ],
-      "defaults": { "upscaler": "fsr1" }
+      "defaults": {
+        "upscaler": "fsr1"
+      }
     },
     {
       "id": "antialias",
       "label": "Anti-aliasing",
       "group": "Image",
       "choices": [
-        { "label": "Off", "set": { "antialias": "off" } },
-        { "label": "SMAA", "set": { "antialias": "smaa" } }
+        {
+          "label": "Off",
+          "set": {
+            "antialias": "off"
+          }
+        },
+        {
+          "label": "SMAA",
+          "set": {
+            "antialias": "smaa"
+          }
+        }
       ],
-      "defaults": { "antialias": "off" }
+      "defaults": {
+        "antialias": "off"
+      }
     },
     {
       "id": "show_fps",
       "label": "Show FPS",
       "group": "Display",
       "choices": [
-        { "label": "Off", "set": { "show_fps": "0" } },
-        { "label": "On", "set": { "show_fps": "1" } }
+        {
+          "label": "Off",
+          "set": {
+            "show_fps": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "show_fps": "1"
+          }
+        }
       ],
-      "defaults": { "show_fps": "0" }
+      "defaults": {
+        "show_fps": "0"
+      }
+    },
+    {
+      "id": "motion",
+      "label": "Motion controls",
+      "help": "How strongly a controller's gyro reaches the game (motion cap throws). Lower it if Cappy is thrown by itself.",
+      "group": "Controls",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "motion_sensitivity": "0"
+          }
+        },
+        {
+          "label": "Low",
+          "set": {
+            "motion_sensitivity": "35"
+          }
+        },
+        {
+          "label": "Normal",
+          "set": {
+            "motion_sensitivity": "60"
+          }
+        },
+        {
+          "label": "High",
+          "set": {
+            "motion_sensitivity": "100"
+          }
+        }
+      ],
+      "defaults": {
+        "motion_sensitivity": "60"
+      }
+    },
+    {
+      "id": "mouse",
+      "label": "Mouse sensitivity",
+      "group": "Controls",
+      "choices": [
+        {
+          "label": "50%",
+          "set": {
+            "mouse_sensitivity": "50"
+          }
+        },
+        {
+          "label": "100%",
+          "set": {
+            "mouse_sensitivity": "100"
+          }
+        },
+        {
+          "label": "200%",
+          "set": {
+            "mouse_sensitivity": "200"
+          }
+        },
+        {
+          "label": "400%",
+          "set": {
+            "mouse_sensitivity": "400"
+          }
+        }
+      ],
+      "defaults": {
+        "mouse_sensitivity": "100"
+      }
     }
   ]
 }
