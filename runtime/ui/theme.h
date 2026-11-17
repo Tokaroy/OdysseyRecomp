@@ -6,7 +6,7 @@
 
 #define THEME_RGB(r, g, b, a) ImVec4((r) / 255.0f, (g) / 255.0f, (b) / 255.0f, (a))
 // the palette (0.2.7: "Starry Voyage", the player's pick - night indigo, star yellow for what's selected)
-static const ImVec4 kPanelV = THEME_RGB(12, 16, 44, 0.97f);         // the menu window (the launcher's night sky)
+static const ImVec4 kPanelV = THEME_RGB(12, 15, 36, 0.86f);           // the menu window (the launcher's night sky)
 static const ImVec4 kSurfaceV = THEME_RGB(27, 36, 88, 1);           // fields, buttons, rows
 static const ImVec4 kSurfaceHoverV = THEME_RGB(40, 54, 124, 1);     // ... under the mouse / the cursor
 static const ImVec4 kAccentV = THEME_RGB(255, 222, 102, 1);         // star yellow: the selection, sliders, headings

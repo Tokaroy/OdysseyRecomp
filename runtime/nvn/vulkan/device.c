@@ -1361,7 +1361,15 @@ static void present_brake(uint64_t now, bool interp) {
             int k = n++ % 120;
             nslow += (d > 20e6) - slow[k];  // (20: three 165 Hz refreshes, 18.2 ms, are no miss)
             slow[k] = d > 20e6;
+            static uint64_t last_step;  // (0.2.7) back up a step after 30 s with the game on time (a busy view passed)
+            int want_n = g_settings.frame_rate == 1 ? 6 : g_settings.frame_rate ? g_settings.frame_rate / 60 : 4;
+            if (nslow < 3 && interp_cap_dyn < want_n && total_frames - last_step > 1800) {
+                interp_cap_dyn++;
+                last_step = total_frames;
+                LOG("[interp] the game on time for 30 s: up to %d images a game frame again\n", interp_cap_dyn);
+            }
             if (nslow >= 12 && interp_step_down()) {  // (0.2.6: 240 -> 180 -> 120 first: fewer in-betweens a frame)
+                last_step = total_frames;
                 LOG("[interp] the game missed its vsync in %d of its last %d frames: %d images a game frame from now\n",
                     nslow, n < 120 ? n : 120, interp_images());
                 memset(slow, 0, sizeof slow);

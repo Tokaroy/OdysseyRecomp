@@ -444,7 +444,9 @@ static void loading_draw(ImDrawList *dl, ImVec2 D, ImFont *f, ImFont *fb, float 
 
 static void panel_draw(ImFont *f, ImFont *fb, float s) {
     ImGuiIO &io = ImGui::GetIO();
-    float w = fminf(io.DisplaySize.x - 2 * 28 * s, 1760 * s), h = io.DisplaySize.y - 2 * 28 * s;
+    // (0.2.7) the settings as a card in the middle, medium size (the same as the game's Esc menu)
+    float w = fminf(fmaxf(io.DisplaySize.x * 0.56f, 760 * s), fminf(io.DisplaySize.x - 2 * 28 * s, 1180 * s));
+    float h = fminf(fmaxf(io.DisplaySize.y * 0.74f, 520 * s), io.DisplaySize.y - 2 * 28 * s);
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
     static int opened_for = -3;

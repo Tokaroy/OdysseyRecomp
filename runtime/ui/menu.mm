@@ -997,29 +997,10 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
     float x = o.x;
-    {   // the project's own icon (docs/icon, tools/make_icon.py: a red ring and a white compass star, as on the GitHub
-        // banner) and the name - not the game's logo (2026-11-11, the player)
-        float d = bar_h * 0.98f, u = d / 1024.0f, rout = (337.92f + 40.96f) * u;  // the 1024 drawing, ring's outer edge
-        float cx = x + rout + 2 * scale, cy = o.y + bar_h * 0.5f;
-        dl->AddCircle(ImVec2(cx, cy), 337.92f * u, IM_COL32(0xE5, 0x38, 0x3B, 255), 64, 81.92f * u);
-        float r1 = 240.64f * u, r2 = 63.49f * u;  // the star's long and short points (512-271.36, 556.893-512 x sqrt2)
-        ImVec2 pts[8];
-        for (int i = 0; i < 8; i++) {
-            float a = i * 0.785398f - 1.570796f, r = (i & 1) ? r2 : r1;
-            pts[i] = ImVec2(cx + cosf(a) * r, cy + sinf(a) * r);
-        }
-        for (int i = 0; i < 8; i += 2) {  // four convex wedges: centre, point, the short points either side
-            ImVec2 q[4] = {ImVec2(cx, cy), pts[(i + 7) % 8], pts[i], pts[i + 1]};
-            dl->AddConvexPolyFilled(q, 4, IM_COL32(0xF2, 0xF6, 0xF8, 255));
-        }
-        x = cx + rout + 16 * scale;
-        float ts = g_font_big->FontSize * 0.62f;
-        dl->AddText(g_font_big, ts, ImVec2(x, cy - ts * 0.5f), kText, RT_APP_NAME);
-        x += g_font_big->CalcTextSizeA(ts, FLT_MAX, 0, RT_APP_NAME).x + 30 * scale;
-    }
-    float ph = 50 * scale, ir = 11 * scale, py = o.y + (bar_h - ph) * 0.5f;
+    // (0.2.7, the card: no icon or name - just the sections, text only, and Continue at the right)
+    float ph = 42 * scale, ir = 0, py = o.y + (bar_h - ph) * 0.5f;
     auto pill = [&](int id, const char *name, float px, bool sel, bool main_action) -> bool {
-        float tw = ImGui::CalcTextSize(name).x, pw = tw + ir * 2 + 52 * scale;
+        float tw = ImGui::CalcTextSize(name).x, pw = tw + 36 * scale;
         ImGui::SetCursorScreenPos(ImVec2(px, py));
         ImGui::PushID(id + 100);
         ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
@@ -1040,8 +1021,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         if (foc) dl->AddRect(ImVec2(a.x - 3 * scale, a.y - 3 * scale), ImVec2(b.x + 3 * scale, b.y + 3 * scale),
                              theme_u32(main_action || sel ? kTextV : kAccentV), rr + 3 * scale, 0, 2.5f * scale);
         ImU32 ink = main_action ? kText : sel ? theme_u32(kPanelV, 1) : foc || hov ? kText : kTextDim;
-        nav_icon(dl, id, ImVec2(px + 22 * scale + ir, py + ph * 0.5f), ir, ink);
-        dl->AddText(ImVec2(px + 22 * scale + ir * 2 + 12 * scale, py + (ph - fs) * 0.5f), ink, name);
+        dl->AddText(ImVec2(px + 18 * scale, py + (ph - fs) * 0.5f), ink, name);
         ImGui::PopID();
         // (moving along the bar shows each section - not while the cursor is being put on a pill: ImGui's own first
         // focus lands on the first pill when the menu opens, and took the section asked for away)
@@ -1056,11 +1036,11 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             opt_focus_first(true);  // (into the section: its first card takes the cursor)
         }
         if (t.id == g_tab) cur = k;
-        x += tw + ir * 2 + 52 * scale + 10 * scale;
+        x += tw + 36 * scale + 6 * scale;
     }
     {   // Continue / Back, at the right end
         const char *cn = in_game ? "Continue" : "Back";
-        float cw = ImGui::CalcTextSize(cn).x + ir * 2 + 52 * scale;
+        float cw = ImGui::CalcTextSize(cn).x + 36 * scale;
         if (pill(-3, cn, o.x + avail.x - cw - 4 * scale, false, true)) {
             if (in_game) set_open(false);
             else g_close_request = true;
@@ -1088,10 +1068,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         ImGui::PushFont(g_font_big);
         ImGui::TextUnformatted(tabs[cur].name);
         ImGui::PopFont();
-        ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
-        ImGui::TextUnformatted(tabs[cur].sub);
-        ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0, 10 * scale));
+        ImGui::Dummy(ImVec2(0, 6 * scale));
     }
     bool page_focused = false;
     ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened | ImGuiWindowFlags_NoBackground);
@@ -1245,16 +1222,16 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (open) {
         // the game dimmed behind the menu, darker towards the bottom; the menu a large rounded panel: the bar on top,
         // the section below
-        ImGui::GetBackgroundDrawList()->AddRectFilledMultiColor(ImVec2(0, 0), io.DisplaySize, IM_COL32(6, 9, 30, 150),
-                                                                IM_COL32(6, 9, 30, 150), IM_COL32(3, 4, 16, 210), IM_COL32(3, 4, 16, 210));
-        float w = fminf(io.DisplaySize.x - 2 * 28 * scale, 1760 * scale), h = io.DisplaySize.y - 2 * 28 * scale;
+        // (0.2.7, the player's pick: a card in the middle, medium size - the game stays in view around it, lightly dimmed)
+        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 6, 18, 95));
+        float w = fminf(fmaxf(io.DisplaySize.x * 0.56f, 760 * scale), fminf(io.DisplaySize.x - 2 * 28 * scale, 1180 * scale));
+        float h = fminf(fmaxf(io.DisplaySize.y * 0.74f, 520 * scale), io.DisplaySize.y - 2 * 28 * scale);
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * scale, 24 * scale));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 22 * scale);
         ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         ImGui::PopStyleVar(2);
-        menu_stars(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize(), scale);
         ImFont *keep_big = g_font_big;  // (the window in the menu's font; the page titles use g_font_big)
         g_font_big = g_menu_font_big;
         ImGui::PushFont(g_menu_font);
