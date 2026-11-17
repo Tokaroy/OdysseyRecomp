@@ -66,13 +66,20 @@ mkdir -p "$X/deps/include/vma" && cp VulkanMemoryAllocator-3.3.0/include/vk_mem_
 
 # SDL3: X11 (and XWayland), PulseAudio / PipeWire / ALSA, udev, D-Bus - loaded at run time; no Wayland (its scanner
 # would have to run on the build machine) and no OpenGL / KMSDRM (the game draws with Vulkan in a window)
-if [ ! -f "$X/deps/lib/libSDL3.so.0" ]; then
+# (0.2.7, GitHub #24) The libraries SDL loads at run time by their sonames: CMake takes the name from the .so's real
+# path, and the sysroot's dev links are plain copies here (no symlinks on Windows), so 0.2.6 asked for "libX11.so" -
+# there only with -dev packages: "No available video device" on players' Linux. The marker: rebuilt once.
+if [ ! -f "$X/deps/lib/libSDL3.so.0" ] || [ ! -f "$X/deps/sdl-sonames-ok" ]; then
     PKG_CONFIG_LIBDIR="$S/usr/lib/x86_64-linux-gnu/pkgconfig;$S/usr/share/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$S" \
     cmake -S SDL3-3.4.16 -B sdl-build -G Ninja -DCMAKE_TOOLCHAIN_FILE="$X/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$XW/deps" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DSDL_SHARED=ON \
         -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_RPATH=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_OPENGL=OFF \
         -DSDL_OPENGLES=OFF -DSDL_IBUS=OFF -DSDL_HIDAPI_LIBUSB=OFF -DSDL_JACK=OFF -DSDL_SNDIO=OFF
-    cmake --build sdl-build -j16 && cmake --install sdl-build
+    H=sdl-build/include-config-release/build_config/SDL_build_config.h
+    [ -f "$H" ] || H=$(find sdl-build -name SDL_build_config.h | head -1)
+    sed -i -e 's/"libX11\.so"/"libX11.so.6"/; s/"libXcursor\.so"/"libXcursor.so.1"/; s/"libXext\.so"/"libXext.so.6"/'         -e 's/"libXfixes\.so"/"libXfixes.so.3"/; s/"libXi\.so"/"libXi.so.6"/; s/"libXrandr\.so"/"libXrandr.so.2"/'         -e 's/"libXss\.so"/"libXss.so.1"/; s/"libXtst\.so"/"libXtst.so.6"/; s/"libasound\.so"/"libasound.so.2"/'         -e 's/"libpipewire-0\.3\.so"/"libpipewire-0.3.so.0"/; s/"libpulse\.so"/"libpulse.so.0"/; s/"libudev\.so"/"libudev.so.1"/' "$H"
+    ! grep -E '_DYNAMIC[A-Z0-9_]* "lib[^"]*\.so"' "$H"  # (none left without a version)
+    cmake --build sdl-build -j16 && cmake --install sdl-build && touch "$X/deps/sdl-sonames-ok"
 fi
 
 # FFmpeg, LGPL only, the movies' codecs (as tools/build_deps_windows.sh). zig on Windows can't link -l<name> against

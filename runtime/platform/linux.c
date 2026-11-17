@@ -104,16 +104,22 @@ static void log_to_file_without_terminal(void) {
 // The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
 // with an illegal instruction on an older CPU.
 #include <cpuid.h>
-static void require_cpu(void) {  // (cpuid directly: the release is linked with zig, whose runtime has no __cpu_model)
+// (0.2.7, GitHub #23) Without AVX2 (Ivy Bridge and older) the game code is built for x86-64-v2 instead (gamebuild.c):
+// slower floating point, the same results. Only a CPU without SSE4.2 (before 2008) is turned away.
+bool plat_cpu_v3(void) {  // (cpuid directly: the release is linked with zig, whose runtime has no __cpu_model)
     unsigned a, b, c, d;
     bool fma = __get_cpuid(1, &a, &b, &c, &d) && (c & bit_FMA) && (c & bit_OSXSAVE);
     bool avx2 = __get_cpuid_count(7, 0, &a, &b, &c, &d) && (b & bit_AVX2) && (b & bit_BMI2);
-    if (fma && avx2) return;
-    fprintf(stderr, "FATAL: Odyssey Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
-                    "newer).\n");
+    return fma && avx2;
+}
+static void require_cpu(void) {
+    unsigned a, b, c, d;
+    if (__get_cpuid(1, &a, &b, &c, &d) && (c & bit_SSE4_2) && (c & bit_POPCNT)) return;
+    fprintf(stderr, "FATAL: Odyssey Recomp needs a CPU with SSE4.2 (2008 or newer).\n");
     exit(1);
 }
 #else
+bool plat_cpu_v3(void) { return true; }
 static void require_cpu(void) {}
 #endif
 

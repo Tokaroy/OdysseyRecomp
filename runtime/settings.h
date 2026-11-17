@@ -34,6 +34,7 @@ typedef struct {
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int aspect;          // ASPECT_*: the image in a window wider than 16:9
     bool frame_interp;   // images between the game's frames (Vulkan: runtime/nvn/interp.c): frame_rate above 60
+    bool vsync;          // (0.2.7) on: no tearing (MAILBOX, else FIFO); off: IMMEDIATE (tearing, least delay)
     int frame_rate;      // (0.2.6) 60, 120, 180, 240; 0: as many as the display shows (up to 240)
     bool deband;         // smooth gradients: the game's final picture in half floats, dithered into the window (Vulkan:
                          // nvn/vulkan/textures.c vk_deband)

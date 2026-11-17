@@ -36,6 +36,7 @@ extern "C" {
 #include "../rt.h"
 #include "../settings.h"
 #include "../update.h"
+#include "../version.h"
 #ifdef __APPLE__
 void *ui_metal_layer(void);
 void *ui_metal_device(void);
@@ -61,11 +62,12 @@ extern int g_tab_request_ext;
 
 // ------------------------------------------------------------------ the look
 #define RGB(r, g, b) IM_COL32(r, g, b, 255)
-static const ImU32 kSkyTop = RGB(20, 58, 78), kSkyBottom = RGB(7, 24, 34);
-static const ImU32 kPlanet = RGB(9, 31, 43), kPlanetRim = IM_COL32(86, 170, 200, 60);
-static const ImU32 kTile = RGB(28, 68, 89), kTileHot = RGB(39, 90, 115);
-static const ImU32 kPlay = RGB(229, 56, 59), kPlayHot = RGB(244, 76, 79);
-static const ImU32 kSoft = RGB(156, 195, 211), kFaint = RGB(104, 144, 160);
+// (0.2.7: "Starry Voyage", the player's pick - a night sky over a planet's glowing rim, the menu as stars along it)
+static const ImU32 kSkyTop = RGB(7, 10, 28), kSkyBottom = RGB(20, 29, 74);
+static const ImU32 kPlanet = RGB(22, 36, 96), kPlanetRim = IM_COL32(120, 170, 255, 70);
+static const ImU32 kTile = RGB(30, 44, 104), kTileHot = RGB(44, 62, 140);
+static const ImU32 kPlay = RGB(255, 227, 107), kPlayHot = RGB(255, 236, 150);
+static const ImU32 kSoft = RGB(207, 224, 255), kFaint = RGB(140, 160, 210);
 
 // ------------------------------------------------------------------ state
 enum { ACT_NONE, ACT_PLAY, ACT_FOLDER, ACT_QUIT, ACT_CHANGE, ACT_REBUILD, ACT_UPDATE, ACT_UPDATE_RESTART };
@@ -96,6 +98,7 @@ ImTextureID launcher_logo(float *aspect) {
             g_logo_aspect = (float)w / (float)h;
             // the window's icon too (the taskbar's): the logo centred on a clear square, 256 px
             SDL_Surface *src = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ABGR8888, px, w * 4);
+            if (src && getenv("ODYSSEY_LOGO_DUMP")) SDL_SavePNG(src, getenv("ODYSSEY_LOGO_DUMP"));  // (design work: never shipped)
             int side = w > h ? w : h;
             SDL_Surface *sq = SDL_CreateSurface(side, side, SDL_PIXELFORMAT_ABGR8888);
             if (src && sq) {
@@ -120,20 +123,34 @@ static uint32_t rnd(uint32_t *s) { return *s = *s * 1664525u + 1013904223u, *s >
 
 void launcher_backdrop(ImDrawList *dl, ImVec2 sz, float s) {
     dl->AddRectFilledMultiColor(ImVec2(0, 0), sz, kSkyTop, kSkyTop, kSkyBottom, kSkyBottom);
-    // stars, twinkling slowly (the same sky every time)
+    // stars, twinkling (the same sky every time), a few bright ones
     double t = SDL_GetTicks() / 1000.0;
     uint32_t seed = 0x0D155E7;
-    for (int i = 0; i < 110; i++) {
-        float x = (rnd(&seed) & 0xffff) / 65535.0f * sz.x, y = (rnd(&seed) & 0xffff) / 65535.0f * sz.y * 0.8f;
-        float ph = (rnd(&seed) & 0xffff) / 65535.0f * 6.283f, sp = 0.4f + (rnd(&seed) & 0xff) / 255.0f;
-        float a = 0.25f + 0.3f * (0.5f + 0.5f * sinf((float)t * sp + ph));
-        dl->AddCircleFilled(ImVec2(x, y), (i % 9 == 0 ? 2.2f : 1.3f) * s, IM_COL32(255, 255, 255, (int)(a * 255)), 8);
+    for (int i = 0; i < 160; i++) {
+        float x = (rnd(&seed) & 0xffff) / 65535.0f * sz.x, y = (rnd(&seed) & 0xffff) / 65535.0f * sz.y * 0.72f;
+        float ph = (rnd(&seed) & 0xffff) / 65535.0f * 6.283f, sp = 0.6f + (rnd(&seed) & 0xff) / 160.0f;
+        float a = 0.15f + 0.85f * (0.5f + 0.5f * sinf((float)t * sp + ph));
+        float r = (i % 11 == 0 ? 2.4f : i % 3 == 0 ? 1.6f : 1.1f) * s;
+        if (i % 11 == 0) dl->AddCircleFilled(ImVec2(x, y), r * 3.2f, IM_COL32(170, 200, 255, (int)(a * 40)), 16);
+        dl->AddCircleFilled(ImVec2(x, y), r, IM_COL32(255, 255, 255, (int)(a * 255)), 8);
     }
-    // a planet's rim along the bottom
-    float r = sz.x * 1.4f;
-    ImVec2 c(sz.x * 0.5f, sz.y * 0.9f + r);
-    dl->AddCircleFilled(c, r, kPlanet, 512);
-    dl->AddCircle(c, r, kPlanetRim, 512, 2.5f * s);
+    // a shooting star now and then (every 7 s, 0.9 s long)
+    float ph = fmodf((float)t, 7.0f);
+    if (ph < 0.9f) {
+        float k = ph / 0.9f, x0 = sz.x * 0.78f - k * sz.x * 0.32f, y0 = sz.y * 0.1f + k * sz.y * 0.16f;
+        for (int i = 0; i < 18; i++) {
+            float q = i / 18.0f;
+            dl->AddCircleFilled(ImVec2(x0 + q * 120 * s, y0 - q * 60 * s), (2.2f - q * 1.8f) * s,
+                                IM_COL32(255, 255, 255, (int)((1 - q) * 230 * (k < 0.85f ? 1 : (1 - k) / 0.15f))), 8);
+        }
+    }
+    // the planet below, its rim glowing
+    float r = sz.x * 0.75f;
+    ImVec2 c(sz.x * 0.5f, sz.y * 0.88f + r);
+    for (int i = 14; i > 0; i--) dl->AddCircleFilled(c, r + i * 7 * s, IM_COL32(110, 160, 255, 6), 256);
+    dl->AddCircleFilled(c, r, kPlanet, 256);
+    dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.08f), r * 0.97f, RGB(14, 22, 58), 256);
+    dl->AddCircle(c, r, kPlanetRim, 256, 3 * s);
 }
 
 // ------------------------------------------------------------------ drawing helpers
@@ -243,6 +260,47 @@ static bool tile(const char *id, ImVec2 p, ImVec2 sz, bool play, int ic, const c
     float y = b.y - pad - ss - 4 * s - ls;
     dl->AddText(play ? fb : f, ls, ImVec2(a.x + pad, y), IM_COL32(255, 255, 255, 255), label);
     dl->AddText(f, ss, ImVec2(a.x + pad, y + ls + 4 * s), play ? IM_COL32(255, 222, 222, 230) : kSoft, sub);
+    return pressed;
+}
+
+// One star of the menu along the planet's rim: a glowing dot over its name; Play a glowing yellow pill. True when
+// chosen; lights up under the mouse or the controller's cursor (eased).
+static bool star_item(const char *id, ImVec2 c, const char *label, bool play, ImFont *f, ImFont *fb, float s) {
+    ImFont *ft = play ? fb : f;
+    float ls = (play ? fb->FontSize * 1.05f : f->FontSize * 1.0f) * s;
+    ImVec2 ts = ft->CalcTextSizeA(ls, FLT_MAX, 0, label);
+    ImVec2 sz = play ? ImVec2(ts.x + 110 * s, ts.y + 34 * s) : ImVec2(ts.x + 40 * s, ts.y + 40 * s);
+    ImVec2 p(c.x - sz.x * 0.5f, c.y - sz.y * 0.5f);
+    ImGui::SetCursorScreenPos(p);
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+    bool pressed = ImGui::InvisibleButton(id, sz, ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
+    bool cursor = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
+    bool lit = ImGui::IsItemHovered() || cursor;
+    float *hv = ImGui::GetStateStorage()->GetFloatRef(ImGui::GetItemID(), 0);
+    *hv += ((lit ? 1.0f : 0.0f) - *hv) * fminf(1, ImGui::GetIO().DeltaTime * 12);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float t = SDL_GetTicks() / 1000.0f;
+    if (play) {
+        float pulse = 1 + 0.035f * sinf(t * 3.4f) + 0.05f * *hv, w = sz.x * pulse, h = sz.y * pulse;
+        ImVec2 a(c.x - w * 0.5f, c.y - h * 0.5f), b(c.x + w * 0.5f, c.y + h * 0.5f);
+        for (int i = 10; i > 0; i--)  // (the glow)
+            dl->AddRectFilled(ImVec2(a.x - i * 3 * s, a.y - i * 3 * s), ImVec2(b.x + i * 3 * s, b.y + i * 3 * s),
+                              IM_COL32(255, 220, 90, 10 + (int)(8 * *hv)), h * 0.5f + i * 3 * s);
+        dl->AddRectFilled(a, b, mix(kPlay, kPlayHot, *hv), h * 0.5f);
+        if (cursor) dl->AddRect(ImVec2(a.x - 6 * s, a.y - 6 * s), ImVec2(b.x + 6 * s, b.y + 6 * s), IM_COL32(255, 255, 255, 235),
+                                h * 0.5f + 6 * s, 0, 3 * s);
+        ImVec2 tp(c.x - ts.x * 0.5f * pulse, c.y - ts.y * 0.5f * pulse);
+        dl->AddText(ft, ls * pulse, tp, RGB(26, 31, 61), label);
+    } else {
+        float dot = (5 + 2.5f * *hv) * s;
+        ImVec2 dc(c.x, c.y - ts.y * 0.5f - 12 * s);
+        for (int i = 6; i > 0; i--) dl->AddCircleFilled(dc, dot + i * 3 * s, IM_COL32(150, 190, 255, 14 + (int)(14 * *hv)), 24);
+        dl->AddCircleFilled(dc, dot, mix(RGB(159, 193, 255), RGB(255, 255, 255), *hv), 24);
+        dl->AddText(ft, ls, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f + 6 * s), mix(kSoft, RGB(255, 255, 255), *hv), label);
+        if (cursor) dl->AddLine(ImVec2(c.x - ts.x * 0.5f, c.y + ts.y * 0.5f + 12 * s), ImVec2(c.x + ts.x * 0.5f, c.y + ts.y * 0.5f + 12 * s),
+                                IM_COL32(255, 255, 255, 220), 2.5f * s);
+    }
     return pressed;
 }
 
@@ -462,7 +520,7 @@ void launcher_draw(float scale, void *font_v, void *font_big_v) {
 
     // the logo (or the name), centred over the tiles
     float row_w = fminf(D.x - 2 * m, 1560 * s), gap = 24 * s, th = fminf(D.y * 0.25f, 290 * s);
-    float ty = D.y * 0.555f;
+    float ty = D.y * 0.64f;
     {
         float aspect = 1;
         ImTextureID logo = launcher_logo(&aspect);
@@ -473,8 +531,13 @@ void launcher_draw(float scale, void *font_v, void *font_big_v) {
             // a soft glow behind it
             for (int i = 0; i < 24; i++)  // (many faint discs: no visible steps)
                 dl->AddCircleFilled(ImVec2(D.x * 0.5f, cy), lw * (0.2f + 0.0145f * i), IM_COL32(120, 200, 230, 3), 128);
-            float bob = sinf(SDL_GetTicks() / 1000.0f * 1.3f) * 4 * s;  // (it floats a little)
-            dl->AddImage(logo, ImVec2((D.x - lw) * 0.5f, cy - lh * 0.5f + bob), ImVec2((D.x + lw) * 0.5f, cy + lh * 0.5f + bob));
+            // it floats: up and down, turning a little (5.5 s)
+            float t = SDL_GetTicks() / 1000.0f * 1.14f, bob = sinf(t) * 9 * s, ang = sinf(t + 1.2f) * 0.021f;
+            float ca = cosf(ang), sa = sinf(ang), hx = lw * 0.5f, hy = lh * 0.5f;
+            ImVec2 cc(D.x * 0.5f, cy + bob), q[4];
+            const float cx4[4] = {-1, 1, 1, -1}, cy4[4] = {-1, -1, 1, 1};
+            for (int i = 0; i < 4; i++) q[i] = ImVec2(cc.x + cx4[i] * hx * ca - cy4[i] * hy * sa, cc.y + cx4[i] * hx * sa + cy4[i] * hy * ca);
+            dl->AddImageQuad(logo, q[0], q[1], q[2], q[3]);
         } else {
             float big = fb->FontSize * 1.5f * s, sp = 6 * s;
             const char *t = "ODYSSEY RECOMP";
@@ -491,31 +554,23 @@ void launcher_draw(float scale, void *font_v, void *font_big_v) {
     ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 1.0f);
     bool starting = g_starting.load();
     ImGui::BeginDisabled(panel || starting);
-    float unit = (row_w - 3 * gap) / 4.6f, x = (D.x - row_w) * 0.5f;
+    // the menu: stars along the planet's rim, Play in the middle
+    (void)row_w, (void)gap, (void)th;
+    float my = D.y * 0.8f, step = fminf(D.x * 0.16f, 300 * s);
     char play_label[16] = "Play";
     if (starting) snprintf(play_label, sizeof play_label, "Starting%.*s", (int)((SDL_GetTicks() / 400) % 4), "...");
-    if (tile("##play", ImVec2(x, ty), ImVec2(unit * 1.6f, th), true, 0, play_label,
-             starting ? "Getting the game ready" : "Super Mario Odyssey 1.0.0", f, fb, s))
-        g_action = ACT_PLAY;
-    if (starting) {  // how far, along the tile's lower edge (vulkan/device.c vk_prepare_step)
-        float pad = 22 * s, bh = 6 * s, bw = unit * 1.6f - 2 * pad, by = ty + th - pad * 0.8f - bh;
-        float fr = fminf(1, fmaxf(0.02f, g_start_frac.load()));
-        dl->AddRectFilled(ImVec2(x + pad, by), ImVec2(x + pad + bw, by + bh), IM_COL32(255, 255, 255, 60), bh * 0.5f);
-        dl->AddRectFilled(ImVec2(x + pad, by), ImVec2(x + pad + bw * fr, by + bh), IM_COL32(255, 255, 255, 240), bh * 0.5f);
-    }
+    if (star_item("##settings", ImVec2(D.x * 0.5f - step * 1.8f, my), "Settings", false, f, fb, s)) open_panel(0);
+    if (star_item("##controls", ImVec2(D.x * 0.5f - step * 0.95f, my), "Controls", false, f, fb, s)) open_panel(8);
+    if (star_item("##play", ImVec2(D.x * 0.5f, my), play_label, true, f, fb, s)) g_action = ACT_PLAY;
     if (g_frames < 4 && !panel) {  // the controller's cursor starts on Play
         ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
         ImGui::SetNavCursorVisible(true);
     }
-    x += unit * 1.6f + gap;
-    if (tile("##settings", ImVec2(x, ty), ImVec2(unit, th), false, 1, "Settings", "Display, sound, add-ons", f, fb, s)) open_panel(0);
-    x += unit + gap;
-    if (tile("##controls", ImVec2(x, ty), ImVec2(unit, th), false, 2, "Controls", "Keys and controller", f, fb, s)) open_panel(8);
-    x += unit + gap;
-    if (tile("##game", ImVec2(x, ty), ImVec2(unit, th), false, 3, "Game", "Your game files", f, fb, s)) {
+    if (star_item("##game", ImVec2(D.x * 0.5f + step * 0.95f, my), "Game", false, f, fb, s)) {
         g_panel = PANEL_GAME;
         g_frames = 0;
     }
+    if (star_item("##quit", ImVec2(D.x * 0.5f + step * 1.8f, my), "Quit", false, f, fb, s)) g_action = ACT_QUIT;
 
     // bottom line: what the buttons do, Quit at the right, the notice in the middle
     {
@@ -530,19 +585,15 @@ void launcher_draw(float scale, void *font_v, void *font_big_v) {
         const char *note = "A fan project, not affiliated with Nintendo";
         float ns = small * 0.85f, nw = f->CalcTextSizeA(ns, FLT_MAX, 0, note).x;
         dl->AddText(f, ns, ImVec2((D.x - nw) * 0.5f, y + (small - ns) * 0.5f), kFaint, note);
-        const char *q = "Quit";
-        ImVec2 qs = f->CalcTextSizeA(small, FLT_MAX, 0, q);
-        ImVec2 qp(D.x - m - qs.x - 28 * s, y - 10 * s), qz(qs.x + 28 * s, qs.y + 20 * s);
-        ImGui::SetCursorScreenPos(qp);
-        ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
-        if (ImGui::InvisibleButton("##quit", qz, ImGuiButtonFlags_EnableNav)) g_action = ACT_QUIT;
-        ImGui::PopStyleColor();
-        bool hot = ImGui::IsItemHovered() || (ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible);
-        if (hot) dl->AddRectFilled(qp, ImVec2(qp.x + qz.x, qp.y + qz.y), kTileHot, 10 * s);
-        if (ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible)
-            dl->AddRect(ImVec2(qp.x - 4 * s, qp.y - 4 * s), ImVec2(qp.x + qz.x + 4 * s, qp.y + qz.y + 4 * s),
-                        IM_COL32(255, 255, 255, 235), 12 * s, 0, 3 * s);
-        dl->AddText(f, small, ImVec2(qp.x + 14 * s, qp.y + 10 * s), hot ? IM_COL32(255, 255, 255, 255) : kSoft, q);
+        {   // the version, bottom right before Quit (0.2.7): and whether it's the newest
+            char ver[96];
+            int us = update_state();
+            snprintf(ver, sizeof ver, "v%s%s", APP_VERSION,
+                     us == UPDATE_READY || us == UPDATE_DOWNLOADING || us == UPDATE_AVAILABLE ? "  -  update on its way"
+                     : update_checked() ? "  -  up to date" : "");
+            float vs = small * 0.85f, vw = f->CalcTextSizeA(vs, FLT_MAX, 0, ver).x;
+            dl->AddText(f, vs, ImVec2(D.x - m - vw, y + (small - vs) * 0.5f), kFaint, ver);
+        }
     }
     ImGui::EndDisabled();
     ImGui::PopStyleVar();

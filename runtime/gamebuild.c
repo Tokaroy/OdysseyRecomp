@@ -296,6 +296,12 @@ static void add_cflags(Args *a, const Tools *t) {
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     char *save = NULL;
     for (char *f = strtok_r(buf, " ", &save); f; f = strtok_r(NULL, " ", &save)) {
+        extern bool plat_cpu_v3(void);  // (platform/*.c: AVX2 + FMA + BMI2 - else x86-64-v2, GitHub #23)
+        if (!strncmp(f, "-march=x86-64-v3", 16) && !plat_cpu_v3()) {
+            static int told;
+            if (!told++) LOG("[gamebuild] this CPU has no AVX2: the game code is built for x86-64-v2\n");
+            f = (char *)"-march=x86-64-v2";
+        }
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
             snprintf(cpu, sizeof cpu, "-mcpu=%s", f + 7);

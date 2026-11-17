@@ -13,6 +13,7 @@ int update_state(void);             // UPDATE_*
 const char *update_latest(void);    // the latest release's tag
 const char *update_error(void);     // UPDATE_FAILED: why, in a few words
 float update_progress(void);        // UPDATE_DOWNLOADING: 0..1
+int update_checked(void);           // the latest release was looked up
 int update_downloaded_mb(void);     // UPDATE_DOWNLOADING: MB of the zip downloaded so far
 void update_install_start(void);    // download and unpack it (a thread of its own)
 void update_apply_and_exit(void);   // UPDATE_READY: hand over to the installer script and end this program

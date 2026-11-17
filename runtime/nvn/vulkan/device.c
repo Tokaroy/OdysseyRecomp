@@ -459,20 +459,27 @@ void vk_start_mark(void) {
 void vk_start_ok(void) { remove("cache/starting"); }  // (the start went well: device.c presents, the exit handler)
 
 // ================================================================== swapchain
-static VkPresentModeKHR present_mode(void) {
+static VkPresentModeKHR g_present_mode = VK_PRESENT_MODE_FIFO_KHR;  // (what the swapchain got)
+static VkPresentModeKHR present_mode_pick(void);
+static VkPresentModeKHR present_mode(void) { return g_present_mode = present_mode_pick(); }
+static VkPresentModeKHR present_mode_pick(void) {
     // MAILBOX by default: the game paces itself (vi.c's emulated 60 Hz vsync), and with FIFO every submission
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. ODYSSEY_VK_PRESENT=fifo|immediate|mailbox to choose.
     const char *e = getenv("ODYSSEY_VK_PRESENT");
-    VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
-                          : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    // (0.2.7) the VSync setting: off = IMMEDIATE (tearing, the least delay), on = MAILBOX
+    VkPresentModeKHR want = e ? (!strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
+                                 : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR)
+                              : g_settings.vsync ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
     VkPresentModeKHR m[16];
     if (n > 16) n = 16;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, m);
     for (uint32_t i = 0; i < n; i++) if (m[i] == want) return want;
+    if (want == VK_PRESENT_MODE_IMMEDIATE_KHR)  // (no IMMEDIATE: MAILBOX)
+        for (uint32_t i = 0; i < n; i++) if (m[i] == VK_PRESENT_MODE_MAILBOX_KHR) return m[i];
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -570,6 +577,7 @@ static void present_lock(void) {
 }
 static void present_unlock(void) { pthread_mutex_unlock(&g_present_lock); }
 static bool g_need_recreate;  // (present lock) the presenter saw the swapchain out of date: the next vk_frame_begin remakes it
+void vk_vsync_changed(void) { g_need_recreate = true; }  // (the VSync setting: a new swapchain with the other present mode)
 // Composing a window image ahead (frame interpolation, compose below): vk_present_draw renders into it as into the
 // window's (its post passes suspend and resume that rendering: vk_frame_suspend / vk_frame_resume)
 static struct { bool on; VkImageView view; VkExtent2D ext; } comp;
@@ -762,15 +770,20 @@ static float display_hz(void) {
 
 // Images per game frame (0.2.6, Video tab "Frame rate"): 60 -> 1, 120 -> 2, 180 -> 3, 240 -> 4, Match display -> as many
 // as the display shows; never more than its refresh rate allows (144 / 165 Hz: 2). ODYSSEY_INTERP=on: what was chosen.
-static int interp_cap_dyn = 4;  // (lowered by the brake: present_brake)
+// (0.2.7) 120 / 180 / 240 render that many frames whatever the display: MAILBOX presents (no waiting for the display,
+// no tearing) and the display shows the newest at each refresh - the player set 240 on a 165 Hz display and got 120.
+// Uncapped (frame_rate 1): up to 6 images a game frame (360 a second), as many as the GPU makes in time (the brake
+// steps down). Match display (0): as many as the display shows. Without MAILBOX (FIFO only), never more than the display.
+static int interp_cap_dyn = 6;  // (lowered by the brake: present_brake)
 static int interp_images(void) {
-    int r = g_settings.frame_rate, n = r ? r / 60 : 4;
+    int r = g_settings.frame_rate, n = r == 1 ? 6 : r ? r / 60 : 4;
     if (n > interp_cap_dyn) n = interp_cap_dyn;
     double hz = display_hz();
     int cap = hz > 0 ? (int)(hz / 60.0 + 0.15) : 2;
     const char *e = getenv("ODYSSEY_INTERP");
-    if (n > cap && !(e && !strcmp(e, "on"))) n = cap;
-    return n < 2 ? 2 : n > 4 ? 4 : n;  // (this thread runs only with interpolation on: at least one in-between)
+    bool capped = r == 0 || g_present_mode == VK_PRESENT_MODE_FIFO_KHR;
+    if (capped && n > cap && !(e && !strcmp(e, "on"))) n = cap;
+    return n < 2 ? 2 : n > 6 ? 6 : n;  // (this thread runs only with interpolation on: at least one in-between)
 }
 static bool interp_step_down(void) {
     int n = interp_images();
@@ -1115,8 +1128,8 @@ static void *interp_thread(void *arg) {
             // (0.2.6) Frame rate 120 / 180 / 240 / Match display: 1-3 in-betweens, each the frame drawn again with the
             // game's state blended at its moment (t = k / n); one the GPU can't make in time is left out
             int ncfg = interp_images(), nimg = blend && !waited && !behind && !j.rest && interp_replays_allowed(j.frame, total_frames) ? ncfg : 1;
-            TexBackend *mk[4];
-            float mt[4];
+            TexBackend *mk[8];
+            float mt[8];
             int nm = 0;
             bool replayed = false;
             uint64_t frame_prev_end = prev_end;  // (the GPU still on the frame before this one: fewer in-betweens now)
@@ -1142,9 +1155,9 @@ static void *interp_thread(void *arg) {
                 vk_render_lock();
                 extern TexBackend *vk_tex_replayed(NvnTexture *t);
                 TexBackend *b = vk_tex_replayed(j.t);  // (textures.c: the replay drew into a twin of the window image)
-                static TexBackend mids[12];
+                static TexBackend mids[16];
                 static int mi;
-                mid = &mids[mi = (mi + 1) % 12];
+                mid = &mids[mi = (mi + 1) % 16];
                 extern volatile long g_f9_shot;  // (F9: the in-between of that frame too, build/frames/f9_<n>_mid.png)
                 if (g_f9_shot && (long)j.frame + 1 == g_f9_shot) {
                     char path[256];
@@ -1181,10 +1194,10 @@ static void *interp_thread(void *arg) {
             if (want > 14e6) want = 14e6;
             delay = want > delay ? want : delay - fmin(delay - want, 0.05e6);
             int64_t due = (int64_t)j.at + (int64_t)delay;
-            uint64_t order = 8 * (j.frame + 1);
+            uint64_t order = 16 * (j.frame + 1);
             double first = ncfg >= 2 ? 1.0 / ncfg : 0.5;  // (the first in-between's moment: shown at due)
             for (int i = 0; i < nm; i++)
-                presenter_queue(mk[i], (uint64_t)(due + (int64_t)(j.period * (mt[i] - first))), order - 7 + (uint64_t)(mt[i] * 6), "in-between");
+                presenter_queue(mk[i], (uint64_t)(due + (int64_t)(j.period * (mt[i] - first))), order - 15 + (uint64_t)(mt[i] * 14), "in-between");
             presenter_queue(j.game, (uint64_t)(due + (int64_t)(j.period * (1 - first))), order, "game image");
         }
         interp_frame_rotate();

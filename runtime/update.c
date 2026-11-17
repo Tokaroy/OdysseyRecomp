@@ -49,6 +49,8 @@ static char g_tag[64], g_url[1024], g_error[200];
 static _Atomic float g_frac;
 
 int update_state(void) { return atomic_load(&g_state); }
+static _Atomic int g_checked;  // (the release list was read: "up to date" means something)
+int update_checked(void) { return atomic_load(&g_checked); }
 const char *update_latest(void) { return g_tag; }
 const char *update_error(void) { return g_error; }
 float update_progress(void) { return atomic_load(&g_frac); }
@@ -162,6 +164,7 @@ static void *check_thread(void *a) {
     const char *t = g_tag[0] == 'v' ? g_tag + 1 : g_tag;
     bool newer = version_cmp(t, APP_VERSION) > 0;
     LOG("[update] latest release %s, this is %s%s\n", g_tag, APP_VERSION, newer ? ": an update is there" : "");
+    atomic_store(&g_checked, 1);
     atomic_store(&g_state, newer && g_url[0] ? UPDATE_AVAILABLE : UPDATE_NONE);
     if (atomic_load(&g_state) == UPDATE_AVAILABLE && (auto_download() || getenv("ODYSSEY_UPDATE_INSTALL_TEST")))
         update_install_start();  // (downloaded right away: the player only restarts)
@@ -292,6 +295,7 @@ void update_apply_and_exit(void) {
 }
 
 #else  // (macOS: updates come with the app as before)
+int update_checked(void) { return 0; }
 int update_state(void) { return UPDATE_NONE; }
 const char *update_latest(void) { return ""; }
 const char *update_error(void) { return ""; }

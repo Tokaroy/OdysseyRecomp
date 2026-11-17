@@ -31,6 +31,7 @@ Settings g_settings = {
     .mouse_camera = true,
     .mouse_sens = 100,
     .frame_rate = 60,
+    .vsync = true,
     .motion_sens = 60,
     .dsu = true,
     .saturation = 1.0f,
@@ -149,9 +150,10 @@ void settings_load(void) {
         else if (!strcmp(key, "deband")) g_settings.deband = atoi(val) != 0;
         else if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "fill") ? ASPECT_FILL : ASPECT_16_9;
         else if (!strcmp(key, "frame_interp")) { g_settings.frame_interp = atoi(val) != 0; if (g_settings.frame_interp && g_settings.frame_rate == 60) g_settings.frame_rate = 120; }
+        else if (!strcmp(key, "vsync")) g_settings.vsync = atoi(val) != 0;
         else if (!strcmp(key, "frame_rate")) {
             int r = atoi(val);
-            g_settings.frame_rate = r == 0 || r == 120 || r == 180 || r == 240 ? r : 60;
+            g_settings.frame_rate = r == 0 || r == 1 || r == 120 || r == 180 || r == 240 ? r : 60;  // (1: uncapped)
             g_settings.frame_interp = g_settings.frame_rate != 60;
         }
         else if (!strcmp(key, "anisotropic")) {
@@ -208,6 +210,7 @@ void settings_save(void) {
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_FILL ? "fill" : "16:9");
     fprintf(f, "frame_interp = %d\n", g_settings.frame_interp);
     fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
+    fprintf(f, "vsync = %d\n", g_settings.vsync ? 1 : 0);
     if (g_settings.aniso) fprintf(f, "anisotropic = %d\n", g_settings.aniso);
     else fprintf(f, "anisotropic = game\n");
     static const char *const sh[] = {"off", "low", "medium", "high", "auto"};

@@ -125,7 +125,7 @@
     {
       "id": "frame_rate",
       "label": "Frame rate",
-      "help": "60 fps is the game's own. 120 / 180 / 240 draw extra frames between the game's own from its state at that moment. Match display: as many as your display shows. Needs a display that fast.",
+      "help": "60 fps is the game's own. 120 / 180 / 240 / Uncapped: extra frames drawn by your GPU from the game's state at that moment. Match display: as many as your display shows.",
       "group": "Display",
       "choices": [
         {
@@ -162,11 +162,41 @@
             "frame_rate": "0",
             "frame_interp": "1"
           }
+        },
+        {
+          "label": "Uncapped",
+          "set": {
+            "frame_rate": "1",
+            "frame_interp": "1"
+          }
         }
       ],
       "defaults": {
         "frame_rate": "60",
         "frame_interp": "0"
+      }
+    },
+    {
+      "id": "vsync",
+      "label": "VSync",
+      "help": "On: no tearing. Off: the least delay, a line may tear.",
+      "group": "Display",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "vsync": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "vsync": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "vsync": "1"
       }
     },
     {

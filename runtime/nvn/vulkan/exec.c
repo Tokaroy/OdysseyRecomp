@@ -3245,6 +3245,9 @@ static bool pc_stage(const uint8_t *bn, size_t size, uint64_t cs, const uint8_t 
 
 typedef struct { const uint8_t *p; uint32_t len, hlen; } PcBlob;
 static int pc_agl_progs, pc_paired_progs;
+// (0.2.7) the effects' archive (EffectPtcl: 4,453 programs - every particle, spark, puff) is prepared whole, drawn
+// before or not: a first box smashed or enemy hit froze for up to a second where the tour hadn't drawn that effect
+static bool pc_file_all;
 static bool pc_add_unique(uint64_t *seen, const uint8_t *vs, uint32_t vmax, const uint8_t *fs, uint32_t fmax, bool known) {
     enum { SB = 16 };
     uint64_t key = ((uint64_t)(uintptr_t)vs * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)fs) | 1;
@@ -3303,7 +3306,7 @@ static void pc_scan_bnsh(const uint8_t *bn, size_t size) {
         if (hv) pc_blob_add(&vlone, &nvl, vc, vm, vh);
         if (hv && hf) {  // (drawn before? hashed as a draw hashes it: vh / fh bytes)
             bool warm;
-            pc_add_unique(seen, vc, vm, fc, fm, drawn_has(hash_words(hash_words(0x9e3779b97f4a7c15ull, vc, vh), fc, fh) | 1, &warm));
+            pc_add_unique(seen, vc, vm, fc, fm, pc_file_all || drawn_has(hash_words(hash_words(0x9e3779b97f4a7c15ull, vc, vh), fc, fh) | 1, &warm));
         }
     }
     nvl = pc_blob_unique(vlone, nvl);
@@ -3445,6 +3448,7 @@ static bool precompile_collect(const char *out, int nt) {
         int before = pc_n;
         // every shader file in it, wherever it sits (archives in archives, effect resources): its magic, 8-aligned
         int had = nbnsh;
+        pc_file_all = strstr(PC_FILES[fi], "EffectData/") != NULL;
         for (size_t o = 0; o + 0x80 <= n; o += 8)
             if (!memcmp(d + o, "BNSH", 4)) { pc_scan_bnsh(d + o, n - o); nbnsh++; }
             else if (!memcmp(d + o, "BAHS", 4)) { pc_scan_sharcb(d + o, n - o); nbnsh++; had = 1 << 30; }

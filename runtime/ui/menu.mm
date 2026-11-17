@@ -24,6 +24,7 @@
 #include "imgui_impl_vulkan.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
 #endif
+extern "C" void vk_vsync_changed(void);  // runtime/nvn/vulkan/device.c (the VSync setting)
 extern "C" void rt_set_fullscreen(SDL_Window *w, bool on);  // runtime/nvn/vulkan/device.c, metal.m
 
 extern "C" {
@@ -481,11 +482,11 @@ static void tab_display(void) {
     }
 #ifndef __APPLE__  // (Vulkan: runtime/nvn/interp.c; device.c rt_set_fullscreen picks the display mode for it)
     {
-        static const char *lim[] = {"60 fps", "120 fps", "180 fps", "240 fps", "Match display"};
-        static const int rates[] = {60, 120, 180, 240, 0};
+        static const char *lim[] = {"60 fps", "120 fps", "180 fps", "240 fps", "Match display", "Uncapped"};
+        static const int rates[] = {60, 120, 180, 240, 0, 1};
         int v = 0;
-        for (int i = 0; i < 5; i++) if (rates[i] == g_settings.frame_rate) v = i;
-        if (opt_choice("Frame rate", &v, lim, 5, 0,
+        for (int i = 0; i < 6; i++) if (rates[i] == g_settings.frame_rate) v = i;
+        if (opt_choice("Frame rate", &v, lim, 6, 0,
                        "How many images a second you see. 60 fps: the game's own frames, each shown once - in "
                        "fullscreen a 144 / 165 Hz display switches to its 60 Hz mode, so movement stays perfectly even. "
                        "The smoothest choice on 144 / 165 Hz.\n\n120 fps: an extra image between each two of the game's "
@@ -494,12 +495,20 @@ static void tab_display(void) {
                        "half a frame of delay; the game itself still runs at 60.\n\n180 / 240 fps: two / three images "
                        "between each two of the game's frames, each drawn again by the GPU from the game's state at that "
                        "moment - real frames, not blended pictures. Match display: as many as the display shows (up to "
-                       "240). Never more than the display's refresh rate; an image the GPU can't make in time is left "
+                       "240). Uncapped: as many as the GPU makes (up to 360). Your display shows the newest at each "
+                       "refresh (no tearing); an image the GPU can't make in time is left "
                        "out rather than slow the game.")) {
             g_settings.frame_rate = rates[v];
             g_settings.frame_interp = rates[v] != 60;
             if (g_settings.fullscreen) g_want_fullscreen_apply.store(true);  // (60 Hz mode, or the desktop's rate)
         }
+    }
+#endif
+#ifndef __APPLE__
+    if (opt_toggle("VSync", &g_settings.vsync, true,
+                   "On: every image waits for the display's refresh, so nothing tears. Off: images go out the moment "
+                   "they're ready - the least delay, but a line can tear across the picture.")) {
+        vk_vsync_changed();
     }
 #endif
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
@@ -1108,6 +1117,30 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     }
 }
 
+// (0.2.7, "Starry Voyage") faint stars twinkling across the menu's panel, a planet's glowing rim along its bottom - the
+// launcher's sky; drawn first, under the rows
+static void menu_stars(ImDrawList *dl, ImVec2 p, ImVec2 sz, float s) {
+    double t = SDL_GetTicks() / 1000.0;
+    uint32_t seed = 0x5EED5;
+    for (int i = 0; i < 90; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        float x = (seed >> 8 & 0xffff) / 65535.0f;
+        seed = seed * 1664525u + 1013904223u;
+        float y = (seed >> 8 & 0xffff) / 65535.0f;
+        seed = seed * 1664525u + 1013904223u;
+        float ph = (seed >> 8 & 0xff) / 40.0f, a = 0.5f + 0.5f * sinf((float)t * (0.7f + (i % 5) * 0.25f) + ph);
+        dl->AddCircleFilled(ImVec2(p.x + 20 * s + x * (sz.x - 40 * s), p.y + 20 * s + y * (sz.y - 40 * s)),
+                            (i % 9 == 0 ? 1.8f : 1.1f) * s, IM_COL32(220, 230, 255, (int)(20 + a * 60)), 8);
+    }
+    float r = sz.x * 0.9f;
+    ImVec2 c(p.x + sz.x * 0.5f, p.y + sz.y + r - 26 * s);
+    dl->PushClipRect(p, ImVec2(p.x + sz.x, p.y + sz.y), true);
+    for (int i = 8; i > 0; i--) dl->AddCircleFilled(c, r + i * 5 * s, IM_COL32(110, 150, 255, 5), 256);
+    dl->AddCircleFilled(c, r, IM_COL32(20, 28, 74, 255), 256);
+    dl->AddCircle(c, r, IM_COL32(120, 170, 255, 60), 256, 2 * s);
+    dl->PopClipRect();
+}
+
 void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float)) {
     ImFont *f0 = g_font, *f1 = g_font_big;
     g_font = font, g_font_big = font_big;
@@ -1212,8 +1245,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (open) {
         // the game dimmed behind the menu, darker towards the bottom; the menu a large rounded panel: the bar on top,
         // the section below
-        ImGui::GetBackgroundDrawList()->AddRectFilledMultiColor(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 18, 28, 150),
-                                                                IM_COL32(4, 18, 28, 150), IM_COL32(2, 8, 14, 205), IM_COL32(2, 8, 14, 205));
+        ImGui::GetBackgroundDrawList()->AddRectFilledMultiColor(ImVec2(0, 0), io.DisplaySize, IM_COL32(6, 9, 30, 150),
+                                                                IM_COL32(6, 9, 30, 150), IM_COL32(3, 4, 16, 210), IM_COL32(3, 4, 16, 210));
         float w = fminf(io.DisplaySize.x - 2 * 28 * scale, 1760 * scale), h = io.DisplaySize.y - 2 * 28 * scale;
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
@@ -1221,6 +1254,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 22 * scale);
         ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         ImGui::PopStyleVar(2);
+        menu_stars(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize(), scale);
         ImFont *keep_big = g_font_big;  // (the window in the menu's font; the page titles use g_font_big)
         g_font_big = g_menu_font_big;
         ImGui::PushFont(g_menu_font);

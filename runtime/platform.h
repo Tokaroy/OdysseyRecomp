@@ -42,6 +42,7 @@ bool plat_exe_path(char *buf, size_t size);
 bool plat_is_steam_deck(void);  // Valve's handheld (its settings: settings.c)
 void plat_exec(char *const argv[]);  // replace the process (NULL = same command line); returns only on failure
 #if defined(_WIN32) || defined(__linux__)
+bool plat_cpu_v3(void);   // AVX2 + FMA + BMI2 (the game code is built for x86-64-v3, else v2)
 void plat_terminate(void);  // end the process now, skipping DLL teardown (exit status 0)
 #endif
 

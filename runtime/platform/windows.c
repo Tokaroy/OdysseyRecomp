@@ -143,11 +143,16 @@ static void log_to_file_without_console(void) {
 
 // The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
 // with an illegal instruction on an older CPU.
+// (0.2.7, GitHub #23) Without AVX2 (Ivy Bridge and older) the game code is built for x86-64-v2 instead (gamebuild.c):
+// slower floating point, the same results. Only a CPU without SSE4.2 (before 2008) is turned away.
+bool plat_cpu_v3(void) {
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
+}
 static void require_cpu(void) {
     __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "Odyssey Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
-                "Odyssey Recomp", MB_ICONERROR | MB_OK);
+    if (__builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt")) return;
+    MessageBoxA(NULL, "Odyssey Recomp needs a CPU with SSE4.2 (2008 or newer).", "Odyssey Recomp", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 
