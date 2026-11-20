@@ -29,6 +29,10 @@ static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
 static VkQueryPool prof_qp;
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
+// (0.2.8) what a slow frame waited on, always counted (render thread; never reset): draws waiting for a build
+// (built), pipeline links, builds done right in the draw (prog_need / run_job), frames held (a full-screen pass not
+// ready). The [hitch] line names the biggest as its cause.
+static uint64_t cum_block_ns, cum_link_ns, cum_build_ns, cum_held;
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
@@ -50,6 +54,7 @@ static void shader_time_log(const char *what, uint64_t addr, uint64_t t0) {
             (unsigned long long)(plat_private_bytes() >> 20));
 }
 static uint64_t op_counts[CMD_COUNT];
+static uint64_t op_ns[CMD_COUNT];  // (ODYSSEY_VK_PROF) time per command kind, nested lists in their CALL
 bool g_debug_frame;
 static char stats_text[2048];
 void vk_collect_dead(void);
@@ -313,7 +318,7 @@ VkCommandBuffer vk_cmd(void) {
             if (q->pool) vkCmdResetQueryPool(s->main, q->pool, 0, CQ_MAX);
         }
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
-        if (prof && prof_qp) {
+        if (prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
             s->ts = true;
@@ -769,6 +774,7 @@ static bool built(_Atomic int *state) {
     static int fs_wait = -1;
     if (fs_wait < 0) fs_wait = getenv("ODYSSEY_FULLSCREEN_WAIT") != NULL;
     if (s == 0 && g_draw_must_wait && !fs_wait && !sync_shaders()) {
+        if (!atomic_load(&g_frame_incomplete)) cum_held++;
         atomic_store(&g_frame_incomplete, true);
         return false;
     }
@@ -776,6 +782,7 @@ static bool built(_Atomic int *state) {
         uint64_t t0 = plat_now_ns();
         kernel_block_begin();  // (the core's other threads run meanwhile: loading)
         while ((s = atomic_load(state)) == 0 && plat_now_ns() - t0 < 10000000000ull) SDL_DelayNS(200000);
+        cum_block_ns += plat_now_ns() - t0;
         if (shader_time_ms() >= 0 && (plat_now_ns() - t0) / 1e6 >= shader_time_ms())
             LOG("[shtime] draw waited %.1f ms for its build (%s)\n", (plat_now_ns() - t0) / 1e6,
                 g_draw_must_wait && !sync_shaders() ? "full-screen pass" : "scene warm-up");
@@ -846,7 +853,7 @@ static void queue_job(void (*fn)(void *), void *arg, int q) {
 }
 
 static void run_job(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
+    if (sync_shaders()) { uint64_t t0 = plat_now_ns(); fn(arg); cum_build_ns += plat_now_ns() - t0; return; }
     queue_job(fn, arg, 0);
 }
 
@@ -893,20 +900,39 @@ uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
-// (ODYSSEY_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
-// present_ns: time in backend_present's acquire/blit/present.
+// Called once per presented frame: frames over 50 ms are logged ([hitch]) with what they waited on and the biggest of
+// it as the cause - always, the first 300 of a run (players' logs), and every one with ODYSSEY_VK_PROF (which also
+// times the backend's exec). present_ns: time in backend_present's acquire/blit/present.
 void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
-    if (!prof) return;
-    static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
+    static uint64_t last_t, l_exec, l_wait, l_draws, l_subs, l_block, l_link, l_build, l_held, l_skip;
+    static int l_tex, logged;
+    extern int vk_live_textures(void);
     uint64_t now = SDL_GetTicksNS();
-    if (last_t && now - last_t > 50000000) {
+    int tex = vk_live_textures();
+    uint64_t skip = stat_skipped >= l_skip ? stat_skipped - l_skip : stat_skipped;  // (stat_skipped: reset per fps line)
+    if (last_t && now - last_t > 50000000 && (prof || logged < 300)) {
+        logged++;
         uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
-        LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
-            "%llu submits, compiles %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
-            ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
-            atomic_load(&stat_compiles));
+        double block = (cum_block_ns - l_block) / 1e6, link = (cum_link_ns - l_link) / 1e6, build = (cum_build_ns - l_build) / 1e6;
+        const char *cause = "game / other";
+        double big = 10;  // (ms: below it no shader cause)
+        if (block > big) cause = "draw waited for a build", big = block;
+        if (build > big) cause = "built in the draw", big = build;
+        if (link > big) cause = "pipeline links", big = link;
+        if (big == 10 && cum_held != l_held) cause = "frame held (pass not ready)";
+        else if (big == 10 && prof && wt / 1e6 > dt / 2e6) cause = "GPU wait";
+        else if (big == 10 && present_ns > dt / 2) cause = "present";
+        else if (big == 10 && tex - l_tex > 8) cause = "new textures";
+        LOG("[hitch] frame %llu: %.0f ms, cause: %s (waited for builds %.1f, built in draw %.1f, links %.1f ms; %llu draws "
+            "skipped, %d new textures, present %.1f", (unsigned long long)frame, dt / 1e6, cause, block, build, link,
+            (unsigned long long)skip, tex - l_tex, present_ns / 1e6);
+        if (prof)
+            LOG("; backend exec %.1f (of which GPU waits %.1f), %llu draws, %llu submits", ex / 1e6, wt / 1e6,
+                (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs));
+        LOG(")\n");
     }
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
+    l_block = cum_block_ns; l_link = cum_link_ns; l_build = cum_build_ns; l_held = cum_held; l_skip = stat_skipped; l_tex = tex;
 }
 
 const char *renderer_stats(void) {
@@ -974,6 +1000,32 @@ const char *renderer_stats(void) {
             hist_at = -1;
         }
     }
+    if (!prof) {  // (the GPU's busy time, always: of the stats line's period)
+        size_t n = strlen(stats_text);
+        extern uint64_t stat_replay_skipped;
+        snprintf(stats_text + n, sizeof stats_text - n, " | gpu %.0f ms busy, replay draws left out %llu", prof_gpu / 1e6,
+                 (unsigned long long)stat_replay_skipped);
+        prof_gpu = 0, stat_replay_skipped = 0;
+    }
+    if (prof) {  // the 6 command kinds that took the most time (CALL: lists inside lists, counted in their own too)
+        size_t n = strlen(stats_text);
+        uint64_t all = 0;
+        for (int i = 0; i < CMD_COUNT; i++) if (i != CMD_CALL) all += op_ns[i];
+        extern uint64_t g_list_lock_wait_ns;
+        extern int cmd_list_count(void);
+        snprintf(stats_text + n, sizeof stats_text - n, " | lists %d, list lock waits %.0f ms | ops ms all %.0f call %.0f",
+                 cmd_list_count(), g_list_lock_wait_ns / 1e6, all / 1e6, op_ns[CMD_CALL] / 1e6);
+        g_list_lock_wait_ns = 0;
+        for (int k = 0; k < 6; k++) {
+            int best = -1;
+            for (int i = 0; i < CMD_COUNT; i++) if (i != CMD_CALL && op_ns[i] && (best < 0 || op_ns[i] > op_ns[best])) best = i;
+            if (best < 0) break;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " %d:%.0f", best, op_ns[best] / 1e6);
+            op_ns[best] = 0;
+        }
+        memset(op_ns, 0, sizeof op_ns);
+    }
     if (prof) {
         prof_up = prof_up_ns;
         prof_up_ns = 0;
@@ -1040,7 +1092,8 @@ static void st_defaults(void) {
 
 void vk_exec_init(void) {
     prof = getenv("ODYSSEY_VK_PROF") != NULL;
-    if (prof) {
+    {   // (0.2.8) the GPU's time per submission, always (two timestamps a submission): every stats line says how busy the
+        // GPU was - a player's slow stretch tells the game's GPU work from another program's
         prof_up_ns = 0;
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
@@ -1075,7 +1128,7 @@ static int debug_pass_no;
 // ODYSSEY_VK_STATE_FILTER=0: every draw sets everything, as before.
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
-       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16, SS_AK = 1 << 17 };
+       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16, SS_AK = 1 << 17, SS_BLEND = 1 << 18, SS_VI = 1 << 19 };
 static struct {
     uint32_t known;  // SS_* bits: the value below is what the command buffer has
     uint32_t vb_known;  // per vertex binding
@@ -1092,6 +1145,7 @@ static struct {
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17];
     uint32_t ak[4];  // vertex attribute kinds (push constant: translate.c vattr)
+    uint64_t blend_h, vi_h;  // (g_vk.dyn_blend / dyn_vi) hashes of the blending and vertex layout last set
 } ss;
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
@@ -1967,7 +2021,13 @@ static void prog_urge(Prog *p) {
 // A draw needs it and it isn't built. Its libraries from the driver's cache if it has them; otherwise while builds
 // block (sync_shaders) the render thread does what is left itself (a step another thread is on: built() waits for it),
 // else the next step moves to the urgent queues.
+static void prog_need_(Prog *p);
 static void prog_need(Prog *p) {
+    uint64_t t0 = plat_now_ns();
+    prog_need_(p);
+    cum_build_ns += plat_now_ns() - t0;
+}
+static void prog_need_(Prog *p) {
     if (atomic_load(&p->step) == PSTEP_LIBS && libs_from_cache(p)) return;
     if (!sync_shaders() || p->huge) { prog_urge(p); return; }
     atomic_store(&p->urgent, true);
@@ -2493,6 +2553,87 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
 
+// ---- (0.2.8, our own shader core) the pipeline's key without the state set per draw (g_vk.dyn_blend / dyn_vi): a
+// program needs one pipeline per set of targets instead of one per blending and vertex layout. The draw keeps the
+// whole key for its own use (vertex buffers, the state set below); cache/pipes.bin and known_pipes.bin hold whole keys
+// too, so the same lists serve both cores (prelink_job takes them through here).
+static void key_canon(PipeKey *k) {
+    if (g_vk.dyn_vi) memset(k->attr_fmt, 0, offsetof(PipeKey, blend) - offsetof(PipeKey, attr_fmt));
+    if (g_vk.dyn_blend) {
+        memset(k->blend, 0, sizeof k->blend);
+        memset(k->write_mask, 0, sizeof k->write_mask);
+        k->blend_on = 0;
+    }
+}
+static const VkDynamicState DYN_BLEND[] = {VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT, VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
+                                           VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT};
+// a dynamic-state list plus the core's own (out: room for n + 4)
+static uint32_t dyn_with_core(VkDynamicState *out, const VkDynamicState *base, uint32_t n, bool blend, bool vi) {
+    memcpy(out, base, sizeof *base * n);
+    if (blend && g_vk.dyn_blend) for (int i = 0; i < 3; i++) out[n++] = DYN_BLEND[i];
+    if (vi && g_vk.dyn_vi) out[n++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
+    return n;
+}
+// The draw's blending and vertex layout as commands (render thread; after its pipeline is bound).
+static void set_core_state(VkCommandBuffer cb, const PipeKey *k) {
+    static PFN_vkCmdSetColorBlendEnableEXT set_en;
+    static PFN_vkCmdSetColorBlendEquationEXT set_eq;
+    static PFN_vkCmdSetColorWriteMaskEXT set_wm;
+    static PFN_vkCmdSetVertexInputEXT set_vi;
+    if (g_vk.dyn_blend && k->ncolor) {
+        uint64_t h = hash_words(0x9ae16a3b2f90404full, k->blend, sizeof k->blend);
+        h = hash_words(h, k->write_mask, sizeof k->write_mask);
+        h = hmix(h, &k->blend_on, 1);
+        h = hmix(h, &k->ncolor, 4);
+        if (ss_need(SS_BLEND, ss.blend_h == h)) {
+            ss.blend_h = h;
+            if (!set_en) {
+                set_en = (PFN_vkCmdSetColorBlendEnableEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEnableEXT");
+                set_eq = (PFN_vkCmdSetColorBlendEquationEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEquationEXT");
+                set_wm = (PFN_vkCmdSetColorWriteMaskEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorWriteMaskEXT");
+            }
+            VkBool32 en[8];
+            VkColorBlendEquationEXT eq[8];
+            VkColorComponentFlags wm[8];
+            uint32_t n = k->ncolor < 8 ? k->ncolor : 8;
+            for (uint32_t i = 0; i < n; i++) {
+                const uint8_t *b = k->blend[i];
+                en[i] = (k->blend_on >> i) & 1;
+                eq[i] = en[i] ? (VkColorBlendEquationEXT){blend_factor(b[1]), blend_factor(b[2]), blend_op(b[5]), blend_factor(b[3]),
+                                                          blend_factor(b[4]), blend_op(b[6])}
+                              : (VkColorBlendEquationEXT){VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+                                                          VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
+                wm[i] = k->write_mask[i];
+            }
+            set_en(cb, 0, n, en);
+            set_eq(cb, 0, n, eq);
+            set_wm(cb, 0, n, wm);
+        }
+    }
+    if (g_vk.dyn_vi) {
+        uint64_t h = hash_words(0x7a3d1f2c5b6e8d91ull, k->attr_fmt, offsetof(PipeKey, blend) - offsetof(PipeKey, attr_fmt));
+        if (ss_need(SS_VI, ss.vi_h == h)) {
+            ss.vi_h = h;
+            if (!set_vi) set_vi = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+            VkVertexInputAttributeDescription2EXT va[32];
+            VkVertexInputBindingDescription2EXT vb[17];
+            uint32_t na = 0, nb = 0;
+            for (int i = 0; i < 32; i++)
+                if (k->attr_mask & (1u << i))
+                    va[na++] = (VkVertexInputAttributeDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, NULL,
+                                                                       (uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
+            for (uint32_t s = 0; s < 17; s++) {
+                if (!(k->used_streams & (1u << s))) continue;
+                bool inst = k->divisor[s] != 0;
+                vb[nb++] = (VkVertexInputBindingDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, NULL, s, k->stride[s],
+                                                                 inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX,
+                                                                 inst && g_vk.divisor ? k->divisor[s] : 1};
+            }
+            set_vi(cb, nb, vb, na, va);
+        }
+    }
+}
+
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
@@ -2541,8 +2682,9 @@ static void build_pipeline(void *arg) {
     }
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
                                               .attachmentCount = k->ncolor, .pAttachments = cba};
+    VkDynamicState dyn[NDYN + 4];
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = NDYN, .pDynamicStates = DYN};
+                                           .dynamicStateCount = dyn_with_core(dyn, DYN, NDYN, true, true), .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
@@ -3598,7 +3740,10 @@ static VkPipeline vertex_input_lib_(const PipeKey *k) {
                                                .vertexAttributeDescriptionCount = na, .pVertexAttributeDescriptions = va};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = topo_class_base(k->topo_class)};
-    VkPipelineDynamicStateCreateInfo dy = DYN_INFO(DYN_VI);
+    VkDynamicState dyn[8];
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                                           .dynamicStateCount = dyn_with_core(dyn, DYN_VI, sizeof DYN_VI / sizeof DYN_VI[0], false, true),
+                                           .pDynamicStates = dyn};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pVertexInputState = &vi,
                                        .pInputAssemblyState = &ia, .pDynamicState = &dy};
     VkPipeline lib = create_lib(&pi, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
@@ -3638,7 +3783,10 @@ static VkPipeline fragment_output_lib_(const PipeKey *k) {
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
-    VkPipelineDynamicStateCreateInfo dy = DYN_INFO(DYN_FO);
+    VkDynamicState dyn[8];
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                                           .dynamicStateCount = dyn_with_core(dyn, DYN_FO, sizeof DYN_FO / sizeof DYN_FO[0], true, false),
+                                           .pDynamicStates = dyn};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .pColorBlendState = &cb,
                                        .pMultisampleState = &ms, .pDynamicState = &dy};
     VkPipeline lib = create_lib(&pi, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
@@ -3692,6 +3840,7 @@ static bool link_pipeline(Pipe *pp) {
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, &pp->pipe);
     link_budget_ok();  // (the frame's count starts first)
     link_spent_ns += plat_now_ns() - t0;
+    cum_link_ns += plat_now_ns() - t0;
     shader_time_log("link", p->code[1], t0);
     if (r != VK_SUCCESS) {
         static int n;
@@ -3805,6 +3954,111 @@ void vk_pipes_save(void) {
         else remove("cache/pipes.bin.tmp");
     }
     pthread_mutex_unlock(&prec_lock);
+    void vk_demos_save(void);
+    vk_demos_save();
+}
+
+// ---- (0.2.8) The cutscene atlas: the programs each cutscene drew a new pipeline for, by the cutscene's name
+// (hle/odyssey_warp.c demo_start), in cache/demos.bin (and known_demos.bin next to the program, when one is recorded).
+// When a cutscene starts, those of its programs that are set up but not built yet go to the urgent queues at once:
+// built during its first frames instead of at their first draw (draws left out, frames held: the cutscene stutter).
+// ODYSSEY_DEMO_ATLAS=0: off.
+typedef struct { uint64_t demo, spv[2]; } DemoRec;
+static DemoRec *demo_recs;
+static int demo_n, demo_cap, demo_saved = -1, demo_shipped;
+static pthread_mutex_t demo_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t demo_hash(const char *n) { return hmix(1469598103934665603ull, n, strlen(n)) | 1; }
+static bool demo_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("ODYSSEY_DEMO_ATLAS"); on = (!e || atoi(e)) && game_is_odyssey(); }
+    return on;
+}
+static bool demo_has(const DemoRec *r) {  // (demo_lock)
+    for (int i = 0; i < demo_n; i++)
+        if (demo_recs[i].demo == r->demo && demo_recs[i].spv[0] == r->spv[0] && demo_recs[i].spv[1] == r->spv[1]) return true;
+    return false;
+}
+static void demo_push(const DemoRec *r) {  // (demo_lock)
+    if (demo_has(r)) return;
+    if (demo_n == demo_cap) demo_recs = realloc(demo_recs, sizeof *demo_recs * (size_t)(demo_cap = demo_cap ? demo_cap * 2 : 1024));
+    demo_recs[demo_n++] = *r;
+}
+static void demo_load_file(const char *path) {  // (demo_lock)
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return;
+    uint32_t hdr[2];
+    DemoRec r;
+    if (fread(hdr, sizeof hdr, 1, f) == 1 && hdr[0] == 0x314f4d44 /* DMO1 */ && hdr[1] == sizeof r)
+        while (fread(&r, sizeof r, 1, f) == 1) demo_push(&r);
+    fclose(f);
+}
+static void demo_ready(void) {  // (demo_lock) loaded once
+    if (demo_saved >= 0) return;
+    char path[1100];
+    if (rt_resource("known_demos.bin", "runtime/nvn/vulkan/known_demos.bin", path, sizeof path)) demo_load_file(path);
+    demo_shipped = demo_n;
+    demo_load_file("cache/demos.bin");
+    demo_saved = demo_n;
+}
+// A draw made a new pipeline while a cutscene runs (render thread)
+static void demo_record(const Prog *p) {
+    extern const char *odyssey_demo(uint64_t *started);
+    if (!demo_on() || !p->spv_key[0] || !p->spv_key[1] || p->huge) return;
+    uint64_t started;
+    const char *d = odyssey_demo(&started);
+    if (!d || !d[0] || renderer_present_count() - started > 3600) return;
+    DemoRec r = {demo_hash(d), {p->spv_key[0], p->spv_key[1]}};
+    pthread_mutex_lock(&demo_lock);
+    demo_ready();
+    demo_push(&r);
+    pthread_mutex_unlock(&demo_lock);
+}
+void vk_demos_save(void) {
+    pthread_mutex_lock(&demo_lock);
+    if (demo_saved >= 0 && demo_n > demo_saved) {
+        mkdir("cache", 0755);
+        FILE *f = fopen("cache/demos.bin.tmp", "wb");
+        uint32_t hdr[2] = {0x314f4d44, (uint32_t)sizeof(DemoRec)};
+        int n = demo_n - demo_shipped;
+        bool ok = f && fwrite(hdr, sizeof hdr, 1, f) == 1 && fwrite(demo_recs + demo_shipped, sizeof *demo_recs, (size_t)n, f) == (size_t)n;
+        if (f) ok = fclose(f) == 0 && ok;
+        if (ok) { remove("cache/demos.bin"); ok = rename("cache/demos.bin.tmp", "cache/demos.bin") == 0; }
+        if (ok) demo_saved = demo_n;
+        else remove("cache/demos.bin.tmp");
+    }
+    pthread_mutex_unlock(&demo_lock);
+}
+// A cutscene starts (the game's thread): its known programs that aren't built yet, to the urgent queues
+void vk_demo_start(const char *name) {
+    if (!demo_on() || !name || !name[0]) return;
+    uint64_t h = demo_hash(name), (*want)[2] = NULL;
+    int nw = 0;
+    pthread_mutex_lock(&demo_lock);
+    demo_ready();
+    for (int i = 0; i < demo_n; i++) {
+        if (demo_recs[i].demo != h) continue;
+        if (!(nw & 63)) want = realloc(want, sizeof *want * (size_t)(nw + 64));
+        want[nw][0] = demo_recs[i].spv[0];
+        want[nw++][1] = demo_recs[i].spv[1];
+    }
+    pthread_mutex_unlock(&demo_lock);
+    if (!nw) { LOG("[demo] no shaders known for \"%s\" yet (recorded as it plays)\n", name); return; }
+    int ready = 0, started = 0, found = 0;
+    pthread_mutex_lock(&prog_lock);
+    for (int i = 0; i < PROG_TAB; i++) {
+        Prog *p = prog_tab[i].prog;
+        if (!p || !p->spv_key[0]) continue;
+        bool hit = false;
+        for (int j = 0; j < nw && !hit; j++) hit = want[j][0] == p->spv_key[0] && want[j][1] == p->spv_key[1];
+        if (!hit) continue;
+        found++;
+        int st = atomic_load(&p->state);
+        if (st == 1) ready++;
+        else if (st == 0) { prog_urge(p); started++; }
+    }
+    pthread_mutex_unlock(&prog_lock);
+    free(want);
+    LOG("[demo] \"%s\": %d programs known, %d set up (%d ready, %d built now)\n", name, nw, found, ready, started);
 }
 
 // The pipelines made ahead, by the draw's key hash (as pipe_tab): a worker claims a slot (key), then publishes the
@@ -3858,6 +4112,7 @@ static void prelink_job(void *arg) {
         PipeKey *k = &keys[i];
         k->prog = p;
         if (k->poly_fill > 3) continue;
+        key_canon(k);
         uint64_t ph = pipe_key_hash(k);
         int slot = pre_claim(ph);
         if (slot < 0) continue;
@@ -3942,6 +4197,25 @@ static int prepare_whole_pipelines(int nt) {
         pw_n = prec_n;
     }
     pthread_mutex_unlock(&prec_lock);
+    {   // (0.2.8) the pipelines the game will ask for: keys without what is set per draw (key_canon), each once - the
+        // lists hold whole keys, and several of them are one pipeline with the new core
+        int before = pw_n, n = 0;
+        uint64_t *seen = calloc((size_t)pw_n * 2 + 1, sizeof *seen);  // (open addressing, 2x room)
+        size_t cap = (size_t)pw_n * 2 + 1;
+        for (int i = 0; i < before; i++) {
+            PipeRec r = pw_recs[i];
+            key_canon(&r.k);
+            uint64_t h = prec_key_hash(&r);  // (never 0: | 1)
+            size_t s = h % cap;
+            while (seen[s] && seen[s] != h) s = (s + 1) % cap;
+            if (seen[s]) continue;
+            seen[s] = h;
+            pw_recs[n++] = r;
+        }
+        free(seen);
+        pw_n = n;
+        if (n != before) LOG("[prep] %d remembered pipelines are %d with blending / vertex layout set per draw\n", before, n);
+    }
     if (!pw_n) { LOG("[prep] no remembered pipelines yet\n"); return 0; }
     vk_pcache_load_headless();
     pthread_t th[16];
@@ -5238,7 +5512,9 @@ static void draw_(CmdRec *r, bool indexed) {
     k.a2c = st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = (uint8_t)((st.poly[2] != 1) | (st.depth_clamp && g_vk.depth_clamp ? 2 : 0));  // (bit 1: depth clamp)
-    uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
+    PipeKey kc = k;  // (the pipeline's key: without what is set per draw - key_canon)
+    key_canon(&kc);
+    uint64_t ph = hash_words(0xcbf29ce484222325ull, &kc, sizeof kc);
     if (!ph) ph = 1;
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1), pprobes = 0;
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph && ++pprobes < PIPE_TAB) pslot = (pslot + 1) & (PIPE_TAB - 1);
@@ -5251,7 +5527,7 @@ static void draw_(CmdRec *r, bool indexed) {
     Pipe *pp = pipe_tab[pslot].pipe;
     if (!pp) {
         pp = calloc(1, sizeof *pp);
-        pp->k = k;
+        pp->k = kc;
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
         static int logp = -1;
@@ -5259,6 +5535,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (logp) LOG("[prog] pipe vs=%llx fs=%llx frame %llu ready %d\n", (unsigned long long)pr->code[0],
                       (unsigned long long)pr->code[1], (unsigned long long)renderer_present_count(), atomic_load(&pr->state));
         prec_record(pr, &k);
+        demo_record(pr);
         VkPipeline pre = pre_lookup(ph);
         if (pre) { pp->pipe = pre; atomic_store(&pp->state, 1); atomic_fetch_add(&stat_prelink_hits, 1); }
         else if (g_vk.gpl && g_draw_relaxed && !pr->no_gpl && pr->lib_fs && !link_budget_ok()) pp->link_later = true;
@@ -5277,6 +5554,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!(pr->huge ? atomic_load(&pp->state) == 1 : built(&pp->state))) { stat_skipped++; return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
+    if (g_vk.dyn_blend || g_vk.dyn_vi) set_core_state(cb, &k);
     if (k.attr_mask && ss_need(SS_AK, !memcmp(ss.ak, akind, sizeof akind))) {
         memcpy(ss.ak, akind, sizeof akind);
         vkCmdPushConstants(cb, pr->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof akind, akind);
@@ -6370,10 +6648,17 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = (uint64_t)(uintptr_t)cmd_list(handle);  // (records live in host memory: runtime/nvn/cmdbuf.c)
     if (!p) return;
+    int prev_op = -1;
+    uint64_t prev_t = 0;
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (prof) {  // (the command before this one: its time)
+            uint64_t t = SDL_GetTicksNS();
+            if (prev_op >= 0) op_ns[prev_op] += t - prev_t;
+            prev_t = t, prev_op = r->op < CMD_COUNT ? (int)r->op : -1;
+        }
         if (g_debug_frame) {  // ODYSSEY_DEBUG_CMDS=2: every command executed
             static int every = -1;
             if (every < 0) { const char *e = getenv("ODYSSEY_DEBUG_CMDS"); every = e && atoi(e) >= 2; }
@@ -6381,7 +6666,7 @@ static void exec_list(uint64_t handle, int depth) {
                            (unsigned long long)r->x[1], (unsigned long long)r->x[2]);
         }
         switch (r->op) {
-        case CMD_END: return;
+        case CMD_END: return;  // (the list's last command: timed at the top of this loop, as CMD_END came after it)
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
             const uint64_t *h = x;
@@ -6674,13 +6959,18 @@ static void prefetch_programs(uint64_t handle, int depth) {
 // Frame interpolation (runtime/nvn/interp.c): a replay of the frame's lists with the logged (blended) uniforms, from the
 // executor's state at the frame's first list (saved with the frame: the interpolation thread replays frame N while the
 // game logs N + 1) - the game's own state is restored after it.
-void renderer_interp_replay(void) {
+// (0.2.8) false: a draw of the replay was left out (its pipeline or program not ready yet - a scene's first frames): the
+// in-between would miss that object for a frame (a flicker), so it isn't shown (device.c). Its skips aren't counted
+// as the game's (stat_skipped): they are stat_replay_skipped.
+uint64_t stat_replay_skipped;
+bool renderer_interp_replay(void) {
     const uint64_t *h;
     uint32_t n = interp_handles(&h);
     size_t sn;
     const void *s0 = interp_frame_state(&sn);
-    if (!s0 || sn != sizeof st) return;
+    if (!s0 || sn != sizeof st) return false;
     vk_render_lock();
+    uint64_t skipped0 = stat_skipped;
     __typeof__(st) st_end = st;
     bool log = g_interp_log;
     memcpy(&st, s0, sizeof st);
@@ -6702,7 +6992,10 @@ void renderer_interp_replay(void) {
     g_interp_log = log;
     st = st_end;
     st.rt_dirty = true;
+    uint64_t left_out = stat_skipped >= skipped0 ? stat_skipped - skipped0 : stat_skipped;
+    if (left_out) stat_skipped -= left_out <= stat_skipped ? left_out : stat_skipped, stat_replay_skipped += left_out;
     vk_render_unlock();
+    return !left_out;
 }
 
 void backend_execute(uint64_t handle) {

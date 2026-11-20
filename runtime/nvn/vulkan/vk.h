@@ -40,6 +40,9 @@ typedef struct {
     bool pbin;  // VK_KHR_pipeline_binary: shader libraries saved as data and created from it (exec.c lib_binary_*)
     bool headless;  // the shader preparation's process (device.c vk_headless_init)
     bool cache_control;  // pipelineCreationCacheControl: "only if the driver has it compiled" (exec.c libs_from_cache)
+    // (0.2.8, our own shader core) blending + write masks (VK_EXT_extended_dynamic_state3) and the vertex layout
+    // (VK_EXT_vertex_input_dynamic_state) set per draw instead of baked into pipelines (exec.c key_canon)
+    bool dyn_blend, dyn_vi;
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;

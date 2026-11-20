@@ -35,6 +35,62 @@ static ListStart *g_lists;
 static int g_nlists, g_lists_cap;
 static _Atomic uint64_t g_list_gen;  // changes with every list begun or ended (command buffers re-check their next_list)
 
+// (0.2.8) cmd_list's lookups - the render thread's, once per list it runs or calls - in a hash table of their own, under
+// a lock held only for a probe. They used to binary-search g_lists under g_list_lock, which the game thread holds while
+// it moves the sorted array (a list begun or ended moves every list after it: 30,000 lists after a while of play, and
+// each flight to another kingdom adds thousands). The render thread waited 600-860 ms of every 2 s for that lock after a
+// flight to the Wooded Kingdom: 42-55 fps (the player's session, 2026-11-18). g_lists stays, for the address ranges.
+// Linear probing, deletion by moving the following entries back (no tombstones); handle 0 = empty.
+// Lock order: g_list_lock, then g_map_lock (cmd_list takes only g_map_lock).
+typedef struct { uint64_t handle; CmdRec *rec; } MapEnt;
+static MapEnt *g_map;
+static uint32_t g_map_cap, g_map_n;  // (cap: a power of two)
+static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static inline uint32_t map_slot(uint64_t h) { return (uint32_t)((h * 0x9E3779B97F4A7C15ull) >> 32) & (g_map_cap - 1); }
+static void map_put_(uint64_t handle, CmdRec *rec);
+static void map_grow(void) {  // (g_map_lock)
+    MapEnt *old = g_map;
+    uint32_t oc = g_map_cap;
+    g_map_cap = oc ? oc * 2 : 4096;
+    g_map = calloc(g_map_cap, sizeof *g_map);
+    if (!g_map) FATAL("nvn: out of host memory for the command list table\n");
+    g_map_n = 0;
+    for (uint32_t i = 0; i < oc; i++) if (old[i].handle) map_put_(old[i].handle, old[i].rec);
+    free(old);
+}
+static void map_put_(uint64_t handle, CmdRec *rec) {  // (g_map_lock)
+    if ((g_map_n + 1) * 2 > g_map_cap) map_grow();
+    uint32_t i = map_slot(handle);
+    while (g_map[i].handle && g_map[i].handle != handle) i = (i + 1) & (g_map_cap - 1);
+    if (!g_map[i].handle) g_map_n++;
+    g_map[i] = (MapEnt){handle, rec};
+}
+static void map_del_(uint64_t handle) {  // (g_map_lock)
+    if (!g_map_cap) return;
+    uint32_t i = map_slot(handle);
+    while (g_map[i].handle && g_map[i].handle != handle) i = (i + 1) & (g_map_cap - 1);
+    if (!g_map[i].handle) return;
+    g_map_n--;
+    for (uint32_t j = i;;) {  // (backward shift: each following entry that may move into the hole does)
+        g_map[i].handle = 0;
+        for (;;) {
+            j = (j + 1) & (g_map_cap - 1);
+            if (!g_map[j].handle) return;
+            uint32_t k = map_slot(g_map[j].handle);
+            if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) continue;  // (its home is between the hole and it)
+            break;
+        }
+        g_map[i] = g_map[j];
+        i = j;
+    }
+}
+static CmdRec *map_get_(uint64_t handle) {  // (g_map_lock)
+    if (!g_map_cap) return NULL;
+    uint32_t i = map_slot(handle);
+    while (g_map[i].handle && g_map[i].handle != handle) i = (i + 1) & (g_map_cap - 1);
+    return g_map[i].handle ? g_map[i].rec : NULL;
+}
+
 static _Atomic uint64_t g_rec_bytes;  // (the status line: host memory of all records)
 uint64_t nvn_record_bytes(void) { return atomic_load(&g_rec_bytes); }
 
@@ -56,21 +112,28 @@ static void arena_free(Arena *a) {
 typedef struct { Arena *a; uint64_t ticket; } Grave;
 static Grave *graves;
 static int ngraves, cap_graves;
+static pthread_mutex_t g_grave_lock = PTHREAD_MUTEX_INITIALIZER;  // (0.2.8: not g_list_lock - the render thread's reap
+                                                                   // waited for the game thread's list moves too)
 static void arena_release(Arena *a) {  // (g_list_lock)
     if (!a || a->live || a->open) return;
     if (!rq_enabled()) { arena_free(a); return; }
+    pthread_mutex_lock(&g_grave_lock);
     if (ngraves == cap_graves) graves = realloc(graves, sizeof *graves * (size_t)(cap_graves = cap_graves ? cap_graves * 2 : 64));
     graves[ngraves++] = (Grave){a, rq_last_ticket()};
+    pthread_mutex_unlock(&g_grave_lock);
 }
 void cmd_reap(uint64_t done) {  // (the render thread, after an item: what no queued list or replay can reach any more)
     if (!ngraves) return;
-    pthread_mutex_lock(&g_list_lock);
+    Arena *dead[64];
+    int nd = 0;
+    pthread_mutex_lock(&g_grave_lock);
     int k = 0;
     for (int i = 0; i < ngraves; i++)
-        if (graves[i].ticket <= done) arena_free(graves[i].a);
+        if (graves[i].ticket <= done && nd < 64) dead[nd++] = graves[i].a;
         else graves[k++] = graves[i];
     ngraves = k;
-    pthread_mutex_unlock(&g_list_lock);
+    pthread_mutex_unlock(&g_grave_lock);
+    for (int i = 0; i < nd; i++) arena_free(dead[i]);  // (outside the lock; any more on the next call)
 }
 
 static int list_lower_bound(uint64_t handle) {  // (g_list_lock)
@@ -112,6 +175,11 @@ static void lists_overwritten(NvnCmdBuf *cb, uint64_t at, uint64_t end) {
     if (cb->list_gen == atomic_load(&g_list_gen) && (!cb->next_list || cb->next_list >= end)) return;
     pthread_mutex_lock(&g_list_lock);
     int i = list_lower_bound(at), j = i;
+    if (j < g_nlists && g_lists[j].handle < end) {  // (their lookups go first)
+        pthread_mutex_lock(&g_map_lock);
+        for (int m = j; m < g_nlists && g_lists[m].handle < end; m++) map_del_(g_lists[m].handle);
+        pthread_mutex_unlock(&g_map_lock);
+    }
     while (j < g_nlists && g_lists[j].handle < end) {
         Arena *la = g_lists[j++].arena;
         la->live--;
@@ -128,12 +196,18 @@ static void lists_overwritten(NvnCmdBuf *cb, uint64_t at, uint64_t end) {
 }
 
 // The records of the list whose handle this is; NULL if no list was begun there (or its memory was given again).
+// (profiling, vulkan/exec.c's stats line) how many lists are recorded now, and the render thread's time waiting for
+// g_list_lock in cmd_list
+uint64_t g_list_lock_wait_ns;
+int cmd_list_count(void) { return g_nlists; }
 CmdRec *cmd_list(uint64_t handle) {
-    CmdRec *r = NULL;
-    pthread_mutex_lock(&g_list_lock);
-    int i = list_lower_bound(handle);
-    if (i < g_nlists && g_lists[i].handle == handle) r = g_lists[i].rec;
-    pthread_mutex_unlock(&g_list_lock);
+    if (pthread_mutex_trylock(&g_map_lock) != 0) {
+        uint64_t t0 = plat_now_ns();
+        pthread_mutex_lock(&g_map_lock);
+        g_list_lock_wait_ns += plat_now_ns() - t0;
+    }
+    CmdRec *r = map_get_(handle);
+    pthread_mutex_unlock(&g_map_lock);
     if (!r) {
         static int warned;
         if (warned++ < 10) LOG("[nvn] command handle %llx: no list recorded there (skipped)\n", (unsigned long long)handle);
@@ -250,6 +324,9 @@ NVN(nvnCommandBufferBeginRecording) {
         g_lists[i] = (ListStart){cb->start, r, cb->arena};
         g_nlists++;
     }
+    pthread_mutex_lock(&g_map_lock);
+    map_put_(cb->start, r);
+    pthread_mutex_unlock(&g_map_lock);
     atomic_fetch_add(&g_list_gen, 1);
     cb->arena->live++;
     pthread_mutex_unlock(&g_list_lock);
@@ -259,7 +336,9 @@ NVN(nvnCommandBufferEndRecording) {
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
     plat_heap_check("EndRecording");
-    if (getenv("ODYSSEY_LOG_LISTS"))
+    static int log_lists = -1;  // (once: a getenv for every list the game ends cost time on the game thread)
+    if (log_lists < 0) log_lists = getenv("ODYSSEY_LOG_LISTS") != NULL;
+    if (log_lists)
         LOG("[lists] cb %llx recorded %llx .. %llx (lr %llx)\n", (unsigned long long)A(0), (unsigned long long)cb->start,
             (unsigned long long)(cb->mem + cb->used), (unsigned long long)c->x[30]);
     RET(cb->start);

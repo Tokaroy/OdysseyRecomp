@@ -1038,7 +1038,36 @@ static void *thread_dump_main(void *arg) {
     return NULL;
 }
 
+// (0.2.8) The freeze watchdog: once the game has shown frames, 15 s without a new one logs every thread's state and
+// call chain, once per freeze ("[freeze]"): a rare hang at a scene start (about 1 start in 10 in tests, 2026-11-18)
+// left logs with nothing after its last frame. ODYSSEY_FREEZE_WATCH=0: off.
+static void *freeze_watch_main(void *arg) {
+    (void)arg;
+    extern uint64_t renderer_present_count(void);
+    uint64_t last = 0, since = plat_now_ns();
+    bool told = false;
+    for (;;) {
+        plat_sleep_until_ns(plat_now_ns() + 1000000000ull);
+        uint64_t n = renderer_present_count(), now = plat_now_ns();
+        if (n != last) { last = n, since = now, told = false; continue; }
+        if (!n || told || now - since < 15000000000ull) continue;
+        told = true;
+        LOG("[freeze] no new frame for 15 s (frame %llu): every thread's state\n", (unsigned long long)n);
+        kernel_dump_threads();
+    }
+    return NULL;
+}
+
 void kernel_init(void) {
+    {
+        static bool watching;
+        const char *e = getenv("ODYSSEY_FREEZE_WATCH");
+        if (!watching && (!e || atoi(e))) {
+            watching = true;
+            pthread_t th;
+            if (pthread_create(&th, NULL, freeze_watch_main, NULL) == 0) pthread_detach(th);
+        }
+    }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {

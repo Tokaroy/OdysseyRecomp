@@ -13,6 +13,9 @@ while IFS= read -r f; do
     case "$f" in
         CLAUDE.md|.github/*) continue ;;  # (no CI: GitHub builds got a new account suspended)
         third_party/imgui/*) echo "$f" | grep -qE "$keep_imgui" || continue ;;
+        # private developer tools: never public (Makefile DEV_TOOLS)
+        runtime/hle/odyssey_devtools_*.inc|runtime/hle/odyssey_travel.[ch]|runtime/ui/menu_devtools.inc) continue ;;
+        docs/notes/travel-and-100-save-*.md) continue ;;
     esac
     mkdir -p "$OUT/$(dirname "$f")"
     cp -p "$f" "$OUT/$f"

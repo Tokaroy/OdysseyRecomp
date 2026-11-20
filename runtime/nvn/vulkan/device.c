@@ -159,7 +159,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[16];
+    const char *ext[24];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -238,6 +238,48 @@ static void create_device(void) {
     }
     g_vk.pbin = pbf.pipelineBinaries;
     LOG("[vk] pipeline binaries: %s\n", g_vk.pbin ? "on" : "off");
+    // (0.2.8, our own shader core) The state the Switch keeps in plain registers - blending, write masks, the vertex
+    // layout - set per draw instead of baked into each pipeline: a program then needs one pipeline per set of target
+    // formats instead of one per combination (the links when entering a place, draws skipped meanwhile; exec.c
+    // key_canon). Each part only where the driver has it; the rest stays in the pipeline as before.
+    // ODYSSEY_SHADER_CORE=old: neither (0.2.7's pipelines); =new: both where supported.
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    {
+        // On by default where it was measured (NVIDIA) and on RADV (Steam Deck, Linux AMD: DXVK under Proton uses both
+        // of these on every game there). The others - AMD's and Intel's Windows drivers, Intel on Linux - keep 0.2.7's
+        // pipelines until it's tried on them (=new turns it on there). docs/notes/shader-core-0.2.8-plan-2026-11-17.md
+        VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 dp2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &dp2);
+        bool known_good = drv.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY || drv.driverID == VK_DRIVER_ID_MESA_RADV;
+        const char *core = getenv("ODYSSEY_SHADER_CORE");
+        bool want = core ? !strcmp(core, "new") : known_good;
+        if (want && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &eds3};
+            vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
+            eds3.pNext = NULL;
+            g_vk.dyn_blend = eds3.extendedDynamicState3ColorBlendEnable && eds3.extendedDynamicState3ColorBlendEquation &&
+                             eds3.extendedDynamicState3ColorWriteMask;
+            if (g_vk.dyn_blend) {
+                VkPhysicalDeviceExtendedDynamicState3FeaturesEXT on = {.sType = eds3.sType,
+                    .extendedDynamicState3ColorBlendEnable = VK_TRUE, .extendedDynamicState3ColorBlendEquation = VK_TRUE,
+                    .extendedDynamicState3ColorWriteMask = VK_TRUE};
+                eds3 = on;
+                ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
+            }
+        }
+        if (want && has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vids};
+            vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
+            vids.pNext = NULL;
+            g_vk.dyn_vi = vids.vertexInputDynamicState;
+            if (g_vk.dyn_vi) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+        }
+        LOG("[vk] shader core: %s%s (blending per draw %s, vertex layout per draw %s)\n", want ? "new" : "0.2.7",
+            core ? " (ODYSSEY_SHADER_CORE)" : "",
+            g_vk.dyn_blend ? "yes" : "no", g_vk.dyn_vi ? "yes" : "no");
+    }
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -271,6 +313,8 @@ static void create_device(void) {
     if (g_vk.gpl) { gplf.pNext = f.pNext; f.pNext = &gplf; }  // (graphicsPipelineLibrary: true from the query)
     if (m5.maintenance5) { m5.pNext = f.pNext; f.pNext = &m5; }
     if (g_vk.pbin) { pbf.pNext = f.pNext; f.pNext = &pbf; }
+    if (g_vk.dyn_blend) { eds3.pNext = f.pNext; f.pNext = &eds3; }
+    if (g_vk.dyn_vi) { vids.pNext = f.pNext; f.pNext = &vids; }
     g_vk.cache_control = have13.pipelineCreationCacheControl;
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
@@ -1093,7 +1137,7 @@ static void replay_done(void) {
 
 static void *interp_thread(void *arg) {
     (void)arg;
-    extern void renderer_interp_replay(void);
+    extern bool renderer_interp_replay(void);
     g_lock_role = "interp";
     double done[64], delay = 0;  // when recent replays were done, from their frame's present (ns; < 0: before it)
     int nd = 0;
@@ -1149,7 +1193,7 @@ static void *interp_thread(void *arg) {
                 bool dbg = dbg_replay >= 0 && (long)j.frame + 1 == dbg_replay;
                 bool dbg_was = g_debug_frame;  // (the game's next frame may be one: ODYSSEY_DEBUG_FRAME)
                 if (dbg) g_debug_frame = true, LOG("===== replay debug (in-between before %ld) =====\n", dbg_replay);
-                renderer_interp_replay();
+                bool whole = renderer_interp_replay();  // (false: a draw was left out - not shown, below)
                 if (dbg) g_debug_frame = dbg_was, LOG("===== replay debug end =====\n");
                 interp_replay_unlock();
                 vk_render_lock();
@@ -1172,7 +1216,7 @@ static void *interp_thread(void *arg) {
                     snprintf(path, sizeof path, "build/frames/frame_%05llu_mid.png", (unsigned long long)j.frame + 1);
                     renderer_save_texture_tex(b, path);
                 }
-                if (compose(mid, b, j.v, j.pv)) mk[nm] = mid, mt[nm++] = t;
+                if (whole && compose(mid, b, j.v, j.pv)) mk[nm] = mid, mt[nm++] = t;
                 vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);  // (the GPU starts on it)
                 prev_end = vk_pending_seq() - 1;
                 vk_render_unlock();

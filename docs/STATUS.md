@@ -54,6 +54,11 @@ through on it at 60 fps.
 - Frame rate 120 / 180 / 240 / Match display (replayed frames, capped by the display); motion sensitivity, DSU motion,
   Joy-Con pair and death-screen fixes; 720p default on the Steam Deck. Not tried on a fast display, a Deck or real
   motion controllers.
+- Our own shader core (in the code for 0.2.8, not released; `notes/shader-core-0.2.8-plan-2026-11-17.md`): blending,
+  write masks and the vertex layout set per draw (NVIDIA, RADV): 20-65 % fewer links, about 35 % fewer whole pipelines
+  without libraries, half the hitches on a first run. Opening cutscene images bit-identical to the old core, no
+  validation messages from it. Every hitch logs its cause; cutscene starts are logged, with the cutscene atlas. Not
+  tried on AMD or Intel GPUs.
 
 ## Known problems
 

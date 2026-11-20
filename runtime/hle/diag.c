@@ -122,7 +122,9 @@ void hle__ZN4sead6system4HaltEv(Cpu *c) {
     uint64_t heap = c->x[21], size = c->x[20];
     LOG("\n[diag] sead halt (x20 %#llx)\n", (unsigned long long)size);
     dump_heap_chain("x21", heap);
-    if (heap >= GUEST_LO && heap < GUEST_HI) dump_exp_heap(c, heap);
+    // (not for a heap that locks: tryAlloc halts with its CriticalSection held, and getFreeSize waited for it for good -
+    // the game froze instead of stopping with these lines; 2026-11-18, SceneHeapResource)
+    if (heap >= GUEST_LO && heap < GUEST_HI && !(LD16(heap + 0xd8) & 1)) dump_exp_heap(c, heap);
     report(c, "sead halt", 0, 0, 0, 0, 0, 0, 0);
 }
 // PrintStringImpl(text, length)

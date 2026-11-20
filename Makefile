@@ -118,6 +118,13 @@ GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+# (0.2.8) Private developer tools (files not in the public repository) only in the developer's own builds:
+# local/dev_tools present (local/ is never versioned). Never in a release: dist passes DEV_TOOLS=0.
+DEV_TOOLS ?= $(if $(wildcard local/dev_tools),1,0)
+ifeq ($(DEV_TOOLS),1)
+RTFLAGS  += -DODYSSEY_DEV_TOOLS
+CXXFLAGS += -DODYSSEY_DEV_TOOLS
+endif
 
 all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: with no game code yet GEN_SRC is " ", which $(if) counts as set)
 
@@ -274,7 +281,7 @@ dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -d build/helper/odysseygen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win $(WIN_B)/OdysseyRecomp.exe
+	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win DEV_TOOLS=0 $(WIN_B)/OdysseyRecomp.exe
 	! nm $(WIN_B)/OdysseyRecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
 	cp $(WIN_B)/OdysseyRecomp.exe $(WIN_B)/OdysseyRecomp.dll.a "$(DIST)/"

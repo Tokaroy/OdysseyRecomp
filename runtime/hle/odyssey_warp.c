@@ -14,6 +14,10 @@
 
 #include "../hle.h"
 #include "../rt.h"
+#ifdef ODYSSEY_DEV_TOOLS
+#include "../byml.h"
+#include "odyssey_travel.h"
+#endif
 
 #define STAGE_SCENE_HOLDER 0x2d0      // StageScene::mGameDataHolder (OdysseyDecomp StageScene.h; control() loads it)
 #define CHANGE_STAGE_INFO_SIZE 0x278  // (static_assert in OdysseyDecomp ChangeStageInfo.h)
@@ -31,10 +35,10 @@ static int g_nwarps, g_next;
 static GuestFn g_control;
 static bool g_log;
 
-static void warp_now(Cpu *c, uint64_t scene) {
+static bool warp_exec(Cpu *c, uint64_t scene, const Warp *wp) {  // true: the game took it
     uint64_t holder = *(uint64_t *)(uintptr_t)(scene + STAGE_SCENE_HOLDER);
-    if (!holder) return;
-    const Warp g_warp = g_warps[g_next++];
+    if (!holder) return false;
+    const Warp g_warp = *wp;
     uint64_t x[9], lr = c->x[30], sp = c->sp;
     memcpy(x, c->x, sizeof x);
     // below the caller's frame: the ChangeStageInfo, then both names; the calls' frames go below all of it
@@ -56,10 +60,16 @@ static void warp_now(Cpu *c, uint64_t scene) {
         c->x[0] = holder, c->x[1] = info;
         guest_call(c, guest_sym("_ZN16GameDataFunction18tryChangeNextStageE20GameDataHolderWriterPK15ChangeStageInfo"));
     }
-    LOG("[warp] frame %llu: %s (entrance \"%s\", scenario %d) -> %s\n", (unsigned long long)renderer_present_count(),
-        g_warp.stage, g_warp.entrance, g_warp.scenario, (c->x[0] & 1) ? "requested" : "refused");
+    bool ok = (c->x[0] & 1) != 0;
+    LOG("[warp] frame %llu: %s%s (entrance \"%s\", scenario %d) -> %s\n", (unsigned long long)renderer_present_count(),
+        g_warp.world ? "world " : "", g_warp.stage, g_warp.entrance, g_warp.scenario, ok ? "requested" : "refused");
     memcpy(c->x, x, sizeof x);
     c->x[30] = lr, c->sp = sp;
+    return ok;
+}
+static void warp_now(Cpu *c, uint64_t scene) {
+    if (!*(uint64_t *)(uintptr_t)(scene + STAGE_SCENE_HOLDER)) return;
+    warp_exec(c, scene, &g_warps[g_next++]);
 }
 
 // ---- ODYSSEY_SAVE_COMPLETE=<frame>: from that frame, once, the playing save becomes a completed one, done the game's own
@@ -76,6 +86,9 @@ static uint64_t gcall(Cpu *c, const char *sym, uint64_t a0, uint64_t a1) {
     guest_call(c, guest_sym(sym));
     return c->x[0];
 }
+#ifdef ODYSSEY_DEV_TOOLS
+#include "odyssey_devtools_save.inc"
+#endif
 
 static void complete_save(Cpu *c, uint64_t scene) {
     uint64_t holder = *(uint64_t *)(uintptr_t)(scene + STAGE_SCENE_HOLDER);
@@ -116,13 +129,20 @@ static void complete_save(Cpu *c, uint64_t scene) {
         int rock = (int32_t)gcall(c, "_ZNK9WorldList21getMoonRockScenarioNoEi", worlds, (uint32_t)w);
         int after = (int32_t)gcall(c, "_ZNK9WorldList24getAfterEndingScenarioNoEi", worlds, (uint32_t)w);
         const char *name = (const char *)(uintptr_t)gcall(c, "_ZNK9WorldList16getMainStageNameEi", worlds, (uint32_t)w);
-        int s = rock > 0 ? rock : after > 0 ? after : scenario[w];
-        LOG("[save] kingdom %d %s: scenario %d -> %d (after the ending %d, moon rock open %d)\n", w, name ? name : "?",
-            scenario[w], s, after, rock);
+        // (0.2.8) a kingdom without a moon rock has 9 there (Mushroom, Dark Side, Darker Side: 5, 2 and 2 scenarios in
+        // SystemData/WorldList) - that scenario doesn't exist, and the stage never finished loading (a black screen with
+        // the loading circle, for good): only a moon rock scenario the kingdom has
+        int num = (int32_t)gcall(c, "_ZNK9WorldList19getWorldScenarioNumEi", worlds, (uint32_t)w);
+        int s = rock > 0 && rock <= num ? rock : after > 0 && after <= num ? after : scenario[w];
+        LOG("[save] kingdom %d %s: scenario %d -> %d (after the ending %d, moon rock open %d, %d scenarios)\n", w,
+            name ? name : "?", scenario[w], s, after, rock, num);
         scenario[w] = s;
     }
     gcall(c, "_ZN12GameDataFile10buyItemAllEv", file, 0);
     gcall(c, "_ZN12GameDataFile7addCoinEi", file, 9999);  // (the game caps it: 9999)
+#ifdef ODYSSEY_DEV_TOOLS
+    complete_save_rest(c, holder, file, nworld);  // (odyssey_devtools_save.inc)
+#endif
     // each moon got blocks saving until its moon-get demo ends (setGotShine: invalidateSaveForMoonGet) - without it
     // the save written was the one from before (9 bytes different: the time)
     gcall(c, "_ZN14GameDataHolder22validateSaveForMoonGetEv", holder, 0);
@@ -146,6 +166,39 @@ bool odyssey_scene_warming(void) {
     return !last || now - last > 2 || now - start < WARMUP_FRAMES;
 }
 
+// (0.2.8) Cutscenes: ProjectDemoDirector::requestStartDemo(name, type) / endDemo(name). Logged ("[demo]", next to the
+// [hitch] lines), and handed to the renderer: the shaders a cutscene drew before are made ready the moment it starts
+// (vulkan/exec.c vk_demo_start, the cutscene atlas).
+static GuestFn g_demo_start, g_demo_end;
+static char g_demo_name[96];
+static _Atomic uint64_t g_demo_at;  // (frame + 1 it started, 0: none running)
+const char *odyssey_demo(uint64_t *started) {
+    uint64_t at = g_demo_at;
+    if (started) *started = at ? at - 1 : 0;
+    return at ? g_demo_name : NULL;
+}
+static void demo_start(Cpu *c) {
+    const char *n = c->x[1] ? (const char *)(uintptr_t)c->x[1] : "";
+    uint64_t now = renderer_present_count();
+    snprintf(g_demo_name, sizeof g_demo_name, "%s", n);
+    g_demo_at = now + 1;
+    LOG("[demo] start \"%s\" (type %d) at frame %llu\n", g_demo_name, (int)c->x[2], (unsigned long long)now);
+    extern void vk_demo_start(const char *name);
+    vk_demo_start(g_demo_name);
+    g_demo_start(c);
+}
+static void demo_end(Cpu *c) {
+    uint64_t now = renderer_present_count();
+    if (g_demo_at) LOG("[demo] end \"%s\" at frame %llu (%llu frames)\n", g_demo_name, (unsigned long long)now,
+                       (unsigned long long)(now + 1 - g_demo_at));
+    g_demo_at = 0;
+    g_demo_end(c);
+}
+
+#ifdef ODYSSEY_DEV_TOOLS
+#include "odyssey_devtools_travel.inc"
+#endif
+
 static void stage_scene_init(Cpu *c) {
     g_scene_new = true;
     g_init(c);
@@ -156,7 +209,20 @@ static void stage_scene_control(Cpu *c) {
     if (g_scene_new) {
         g_scene_new = false;
         g_scene_start = now;
-        if (g_log) LOG("[warp] stage scene %llx running at frame %llu\n", (unsigned long long)c->x[0], (unsigned long long)now - 1);
+        if (g_log) {  // (with the stage's name: GameDataFile's current stage, +0x330)
+            uint64_t holder = *(uint64_t *)(uintptr_t)(c->x[0] + STAGE_SCENE_HOLDER), x[31], lr = c->x[30], sp = c->sp;
+            const char *here = NULL;
+            if (holder) {
+                memcpy(x, c->x, sizeof x);
+                c->sp = (sp - 0x400) & ~0xFull;
+                uint64_t file = gcall(c, "_ZN16GameDataFunction15getGameDataFileE20GameDataHolderWriter", holder, 0);
+                memcpy(c->x, x, sizeof x);
+                c->x[30] = lr, c->sp = sp;
+                here = file ? *(const char **)(uintptr_t)(file + 0x330) : NULL;
+            }
+            LOG("[warp] stage scene %llx running at frame %llu: %s\n", (unsigned long long)c->x[0], (unsigned long long)now - 1,
+                here ? here : "?");
+        }
     }
     g_last_control = now;
     if (g_complete_at && now >= g_complete_at && now - g_scene_start > 60) {  // (a scene well under way)
@@ -183,6 +249,9 @@ static void stage_scene_control(Cpu *c) {
         memcpy(c->x, x, sizeof x);
         c->x[30] = lr, c->sp = sp;
     }
+#ifdef ODYSSEY_DEV_TOOLS
+    devtools_control(c, now);  // (odyssey_devtools_travel.inc)
+#endif
     if (g_next < g_nwarps && renderer_present_count() >= g_warps[g_next].at) warp_now(c, c->x[0]);
     g_control(c);
 }
@@ -229,4 +298,12 @@ void odyssey_boot(void) {
     g_init = dispatch_lookup(init);
     hle_override(control, stage_scene_control, "StageScene::control (hooks)");
     hle_override(init, stage_scene_init, "StageScene::init (hooks)");
+    uint64_t ds = loader_find_symbol("_ZN19ProjectDemoDirector16requestStartDemoEPKcNS_8DemoTypeE");
+    uint64_t de = loader_find_symbol("_ZN19ProjectDemoDirector7endDemoEPKc");
+    if (ds && de) {
+        g_demo_start = dispatch_lookup(ds);
+        g_demo_end = dispatch_lookup(de);
+        hle_override(ds, demo_start, "ProjectDemoDirector::requestStartDemo (cutscenes)");
+        hle_override(de, demo_end, "ProjectDemoDirector::endDemo (cutscenes)");
+    }
 }

@@ -956,6 +956,10 @@ static void nav_icon(ImDrawList *dl, int id, ImVec2 c, float r, ImU32 col) {
     }
 }
 
+#ifdef ODYSSEY_DEV_TOOLS
+#include "menu_devtools.inc"
+#endif
+
 static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // Odyssey Recomp's own pause screen (2026-11-10, the player: "change everything, ours"): a bar along the top - our
     // icon and name, the sections as pills side by side, Continue at the right - and the open section below it in one
@@ -970,6 +974,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     tabs[ntabs++] = {"Sound", "Volume and effects", 1};
     tabs[ntabs++] = {"Input", "Language, controllers, mouse and keyboard", 8};
     tabs[ntabs++] = {"Add-ons", "Mods for the game's files", 2};
+#ifdef ODYSSEY_DEV_TOOLS
+    if (in_game && !prelaunch) tabs[ntabs++] = {"Travel", "Kingdoms, stages and your save", 10};
+#endif
     if (!prelaunch) tabs[ntabs++] = {"Exit", "Leave " RT_APP_NAME, 9};
     if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
     if (g_tab_request != -2) {
@@ -1079,6 +1086,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     case 2: tab_mods(scale); break;
     case 8: tab_about(); break;
     case 9: tab_quit(scale, in_game); break;
+#ifdef ODYSSEY_DEV_TOOLS
+    case 10: tab_travel(scale); break;
+#endif
     }
     static const char *scroll_test = getenv("ODYSSEY_MENU_SCROLL");  // test hook: page scroll, 0..1
     if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
