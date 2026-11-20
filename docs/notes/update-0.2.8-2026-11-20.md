@@ -22,10 +22,17 @@ What went in, with the notes behind each:
 - **Cutscene hook and atlas** (exec.c `vk_demo_start`, hle/odyssey_warp.c): `[demo]` lines; programs a cutscene drew
   before are built when it starts.
 - `diag.c`: a halt in a locked heap stops the game with its lines instead of freezing it.
+- **In-betweens replay the lists their frame ran** (`interp-replay-lists-2026-11-20.md`): the game records its next
+  frame at the same command handles while a frame's in-betweens are made; at 240 the 2nd and 3rd in-betweens repeated
+  the 1st and half-recorded lists made objects flicker (the Odyssey's balloon). Now even steps, 60 fps on the player's
+  real screen.
+- **Scene starts no longer stall** (`scene-start-list-table-2026-11-20.md`): the command-list table in sorted blocks;
+  on the player's path hitches over 150 ms 48 (11.5 s) -> 3 (0.8 s, the game's own start). What is left is one frame in
+  the black loading screen.
+- **The scene heap halt after many trips in a row**: trips wait for the kingdom's resource loader before the next flight
+  (19 flights in a row, no halt).
+- `tools/test_watch.py`: one report of every problem a test run shows (stops, freezes, hitches by cause, fps drops,
+  flicker and in-between stalls in `ODYSSEY_BURST` images).
 
-Not done / open:
-- `sead halt` (SceneHeapResource full) after many stage changes in a row with scene restarts between them - also in
-  upstream's warp tool's grand tour (5 of 33 runs). The scene log now carries stage names to find it.
-- A rare freeze at a scene start (2 in ~25 starts in tests, not reproduced since): the watchdog will say where.
-- The first frame after a load (300-650 ms: ~500 textures uploaded, warm-up builds) - under the fade, next to work on.
-- Not tried: AMD / Intel on Windows, Linux, Steam Deck, a 240 Hz display.
+Not tried: AMD / Intel on Windows, Linux, Steam Deck. No freeze at a scene start in today's ~60 starts (the watchdog
+would say where).

@@ -59,13 +59,17 @@ through on it at 60 fps.
   without libraries, half the hitches on a first run. Opening cutscene images bit-identical to the old core, no
   validation messages from it. Every hitch logs its cause; cutscene starts are logged, with the cutscene atlas. Not
   tried on AMD or Intel GPUs.
+- In-betweens replay the command lists their frame ran, not the ones at the same handle now (the game records its next
+  frame there meanwhile): at 240 the 2nd and 3rd in-betweens had repeated the 1st, and half-recorded lists made objects
+  flicker - the Odyssey's balloon (`notes/interp-replay-lists-2026-11-20.md`). `tools/test_watch.py` reports such
+  stalls.
 
 ## Known problems
 
 | Problem | State |
 | --- | --- |
 | A stage or effect seen for the first time can hold the picture for a moment (shader builds) | Upstream known issue; cached afterwards |
-| The first frames of a new scene (entering a kingdom, after a fall) take 150-350 ms: GPU work, not shaders | Open |
+| The first frame of a new scene (entering a kingdom, after a fall) takes 110-150 ms (GPU: a noise target in our pc-state-machine translation) | In the black loading screen, not seen; the 150-280 ms frames after it were the list table: fixed (`notes/scene-start-list-table-2026-11-20.md`) |
 | Linux: built on Windows (tools/linux/cross_build.sh), never run on Linux here | Open |
 | Game update 1.4.0 not supported yet (1.0.0 only) | Planned |
 | Not re-checked on the new base: puddle colours, the flicker by Mario's eye on the title | Open |

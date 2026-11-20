@@ -1135,6 +1135,28 @@ static void replay_done(void) {
     pthread_mutex_unlock(&ij_mx);
 }
 
+// (0.2.8) In-betweens that fit: the render thread draws the game's frame and then each in-between again, one after
+// another. In busy places (Steam Gardens, 240 = three a frame) they no longer fit in the game's 16.7 ms and the game
+// fell to 52-56 fps until the brake (12 late frames) stepped in - with in-betweens off it held 60 there on the player's
+// screen. Now each frame gets only as many as its time leaves: the frame period, less 3 ms, less the render thread's
+// time on the game's own lists (exec_ema), over the time one in-between takes (replay_ema). The brake stays behind it.
+static double replay_ema, exec_ema;
+static uint64_t fit_limited, fit_frames;
+static double game_period;  // (defined below, with its value)
+// (0.2.8, the test watcher: tools/test_watch.py) ODYSSEY_BURST=<every>:<n>[:<from>]: every <every> frames from <from>,
+// <n> game frames in a row -> build/frames/frame_<N>.png, and each one's in-betweens before it ->
+// frame_<N>_mid<k>.png (k = 1..): the order on screen, for finding flicker (an object gone in one image, back in the
+// next). Saving images makes frames late: the interpolation brake is off for it.
+static bool burst_frame(long frame) {
+    static long every = -1, n, from;
+    if (every < 0) {
+        const char *e = getenv("ODYSSEY_BURST");
+        every = 0, n = 6, from = 0;
+        if (e) sscanf(e, "%ld:%ld:%ld", &every, &n, &from);
+    }
+    return every > 0 && frame >= from && (frame - from) % every < n;
+}
+
 static void *interp_thread(void *arg) {
     (void)arg;
     extern bool renderer_interp_replay(void);
@@ -1159,14 +1181,15 @@ static void *interp_thread(void *arg) {
             // (the game's present is past and it already waits to draw its next frame - a busy scene, a cutscene: this
             // in-between is left out rather than cost the game its vsync; before the present only the game's other
             // threads can wait - a list of theirs, off the frame's path)
-            bool waited = blend && !shot && atomic_load(&replay_waiters) > 0 && plat_now_ns() > j.at;
+            bool bshot = burst_frame((long)j.frame + 1);  // (ODYSSEY_BURST: every in-between, as for ODYSSEY_INTERP_SHOT)
+            bool waited = blend && !shot && !bshot && atomic_load(&replay_waiters) > 0 && plat_now_ns() > j.at;
             nskipped += waited;
             // The GPU still on the frame before (its game work or its in-between, prev_end): an in-between now would
             // make this game frame late - its image goes alone, the GPU catches up. A frame at a time, no mode switch:
             // the in-betweens' GPU work made the player's frames miss their vsync (2026-11-10: replays done 10-17 ms
             // after the present was due, the game's own waits only 1-2 ms).
             static uint64_t prev_end;
-            bool behind = blend && !shot && prev_end && vk_completed_seq() < prev_end;
+            bool behind = blend && !shot && !bshot && prev_end && vk_completed_seq() < prev_end;
             nbehind += behind;
             nrest += j.rest;
             // (0.2.6) Frame rate 120 / 180 / 240 / Match display: 1-3 in-betweens, each the frame drawn again with the
@@ -1177,9 +1200,23 @@ static void *interp_thread(void *arg) {
             int nm = 0;
             bool replayed = false;
             uint64_t frame_prev_end = prev_end;  // (the GPU still on the frame before this one: fewer in-betweens now)
+            if (nimg > 1 && replay_ema > 0 && !bshot) {  // (only as many as fit: above)
+                double budget = (game_period > 8e6 ? game_period : 16.67e6) - 3e6 - exec_ema;
+                int fit = budget <= 0 ? 1 : 1 + (int)(budget / replay_ema);
+                fit_frames++;
+                if (fit < nimg) nimg = fit < 1 ? 1 : fit, fit_limited++;
+                if (fit_frames >= 600) {
+                    if (fit_limited)
+                        LOG("[interp] %llu of the last %llu frames got fewer in-betweens to keep the game on time (one takes "
+                            "%.1f ms, the game's lists %.1f ms)\n", (unsigned long long)fit_limited,
+                            (unsigned long long)fit_frames, replay_ema / 1e6, exec_ema / 1e6);
+                    fit_limited = fit_frames = 0;
+                }
+            }
             for (int k = 1; k < nimg; k++) {
-            if (k > 1 && !shot && frame_prev_end && vk_completed_seq() < frame_prev_end) break;
+            if (k > 1 && !shot && !bshot && frame_prev_end && vk_completed_seq() < frame_prev_end) break;
             float t = (float)k / (float)nimg;
+            uint64_t r0 = plat_now_ns();  // (this in-between's time: replay_ema)
             if (!(interp_prepare(t) && interp_replay_lock())) break;
             {
                 replayed = true;
@@ -1216,10 +1253,18 @@ static void *interp_thread(void *arg) {
                     snprintf(path, sizeof path, "build/frames/frame_%05llu_mid.png", (unsigned long long)j.frame + 1);
                     renderer_save_texture_tex(b, path);
                 }
+                if (burst_frame((long)j.frame + 1)) {  // (ODYSSEY_BURST: each in-between of the frame, in order)
+                    char path[256];
+                    mkdir("build/frames", 0755);
+                    snprintf(path, sizeof path, "build/frames/frame_%05llu_mid%d.png", (unsigned long long)j.frame + 1, k);
+                    renderer_save_texture_tex(b, path);
+                }
                 if (whole && compose(mid, b, j.v, j.pv)) mk[nm] = mid, mt[nm++] = t;
                 vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);  // (the GPU starts on it)
                 prev_end = vk_pending_seq() - 1;
                 vk_render_unlock();
+                double rt = (double)(plat_now_ns() - r0);
+                replay_ema = replay_ema > 0 ? replay_ema + (rt - replay_ema) * 0.2 : rt;
             }
             }
             if (!replayed) {
@@ -1327,6 +1372,11 @@ static bool frame_placement(float v[4], float pv[8]) {
 // the interpolation thread (above) - with its image when it makes in-betweens; ODYSSEY_INTERP=measure only matches it
 // (stats). present_at: when its present is due (host ns).
 static void frame_decide(NvnTexture *t, uint64_t present_at) {
+    {   // (the game's lists this frame: the render thread's time on them, smoothed)
+        extern uint64_t g_exec_frame_ns;
+        exec_ema += ((double)g_exec_frame_ns - exec_ema) * 0.1;
+        g_exec_frame_ns = 0;
+    }
     TexBackend *b = vk_tex(t, true);
     vk_end_pass();
     g_interp_present_frame = total_frames;
@@ -1357,7 +1407,8 @@ static void frame_decide(NvnTexture *t, uint64_t present_at) {
         TexBackend *w = &wins[wi = (wi + 1) % 3];
         if (compose(w, b, fd.v, fd.pv)) {
             extern volatile long g_f9_shot;
-            if (getenv("ODYSSEY_SHOT_AT") || getenv("ODYSSEY_SCREENSHOT_EVERY") || (g_f9_shot && (long)total_frames <= g_f9_shot)) {
+            if (getenv("ODYSSEY_SHOT_AT") || getenv("ODYSSEY_SCREENSHOT_EVERY") || getenv("ODYSSEY_BURST") ||
+                (g_f9_shot && (long)total_frames <= g_f9_shot)) {
                 hold_make(b, &hold[wi]);
                 image_copy(b, &hold[wi]);
                 fd.game_img = &hold[wi];
@@ -1400,7 +1451,7 @@ static void present_brake(uint64_t now, bool interp) {
         double d = (double)(now - last);
         game_period += ((d < 8e6 ? 8e6 : d > 50e6 ? 50e6 : d) - game_period) * 0.05;
         static int shots = -1;  // (ODYSSEY_INTERP_SHOT: saving images makes frames late - no brake for the series)
-        if (shots < 0) shots = getenv("ODYSSEY_INTERP_SHOT") != NULL;
+        if (shots < 0) shots = getenv("ODYSSEY_INTERP_SHOT") != NULL || getenv("ODYSSEY_BURST") != NULL;
         if (interp && !shots) {
             int k = n++ % 120;
             nslow += (d > 20e6) - slow[k];  // (20: three 165 Hz refreshes, 18.2 ms, are no miss)
@@ -1568,6 +1619,14 @@ static void backend_present_locked(NvnTexture *t, bool handed) {
         }
     }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
+    if (burst_frame((long)total_frames)) {  // (ODYSSEY_BURST: the game frame, after its in-betweens)
+        char path[256];
+        mkdir("build/frames", 0755);
+        snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
+        vk_render_lock();
+        renderer_save_texture_tex(game_img ? game_img : b, path);
+        vk_render_unlock();
+    }
     {   // ODYSSEY_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;
         static int init;

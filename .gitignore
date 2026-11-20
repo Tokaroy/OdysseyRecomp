@@ -48,3 +48,6 @@ generated141/
 # a player's own icon (Makefile ICON_DIR): may be someone else's artwork, never versioned
 /local/
 /movie_syms.txt
+
+# save backups the developer tools make (never versioned)
+/save-backup-*/

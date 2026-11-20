@@ -199,6 +199,19 @@ static void demo_end(Cpu *c) {
 #include "odyssey_devtools_travel.inc"
 #endif
 
+// ODYSSEY_LOG_ARCHIVES=1 (research): every archive load the game asks for - al::ArchiveHolder::addNewLoadRequestEntry
+// (name, heap, device) - with the heap it goes to (sead::Heap: name at +0x28, size +0x40; diag.c's layout). For the
+// heap a "sead halt" fills (SceneHeapResource, 512 KB, after many trips between kingdoms).
+static GuestFn g_add_load;
+static void add_load_entry(Cpu *c) {
+    const char *name = c->x[1] ? *(const char **)(uintptr_t)(c->x[1] + 8) : NULL;  // (sead::SafeString: its text at +8)
+    uint64_t heap = c->x[2];
+    const char *hn = heap ? *(const char **)(uintptr_t)(heap + 0x28) : NULL;
+    LOG("[archive] frame %llu: %s -> heap %s (%#llx)\n", (unsigned long long)renderer_present_count(), name ? name : "?",
+        hn ? hn : "?", heap ? (unsigned long long)*(uint64_t *)(uintptr_t)(heap + 0x40) : 0ull);
+    g_add_load(c);
+}
+
 static void stage_scene_init(Cpu *c) {
     g_scene_new = true;
     g_init(c);
@@ -298,6 +311,13 @@ void odyssey_boot(void) {
     g_init = dispatch_lookup(init);
     hle_override(control, stage_scene_control, "StageScene::control (hooks)");
     hle_override(init, stage_scene_init, "StageScene::init (hooks)");
+    if (getenv("ODYSSEY_LOG_ARCHIVES")) {
+        uint64_t al = loader_find_symbol("_ZN2al13ArchiveHolder22addNewLoadRequestEntryERKN4sead14SafeStringBaseIcEEPNS1_4HeapEPNS1_10FileDeviceE");
+        if (al) g_add_load = dispatch_lookup(al), hle_override(al, add_load_entry, "ArchiveHolder::addNewLoadRequestEntry (log)");
+    }
+#ifdef ODYSSEY_DEV_TOOLS
+    devtools_hooks();
+#endif
     uint64_t ds = loader_find_symbol("_ZN19ProjectDemoDirector16requestStartDemoEPKcNS_8DemoTypeE");
     uint64_t de = loader_find_symbol("_ZN19ProjectDemoDirector7endDemoEPKc");
     if (ds && de) {

@@ -90,6 +90,7 @@ typedef struct {
     CbRec *cbs; uint32_t ncbs, cap_cbs;
     uint8_t *bytes; uint64_t nbytes, cap_bytes;
     uint64_t *handles; uint32_t nhandles, cap_handles;
+    struct { uint64_t h; const void *rec; } *lists; uint32_t nlists, cap_lists;  // every list run (calls too), in order: interp_list_note
     bool overflow, destroyed;
     uint64_t free_gen;  // interp_free_begin's count when the frame's first list ran
     uint64_t frame_no;  // the game's present it was closed at (interp_frame_close)
@@ -527,7 +528,7 @@ static float cls_get(const Frame *f, const CbRec *c) {
 }
 
 static void frame_reset(Frame *f) {
-    f->ndraws = f->ncbs = f->nhandles = f->nsto = f->ndout = 0;
+    f->ndraws = f->ncbs = f->nhandles = f->nsto = f->ndout = f->nlists = 0;
     f->nbytes = 0;
     f->overflow = f->destroyed = false;
 }
@@ -573,6 +574,31 @@ bool interp_list_submitted(uint64_t handle) {
     GROW(lg->handles, lg->nhandles, lg->cap_handles, 64);
     lg->handles[lg->nhandles++] = handle;
     return first;
+}
+
+// (0.2.8) The records each list ran with. A list's handle is the guest address it was begun at, and Odyssey records
+// its next frame into the same command memory while the in-betweens of this one are still being made: a replay that
+// looked its lists up by handle ran the next frame's (the second and third in-betweens at 240 drew into the next
+// frame's window image - the screen showed the first one three times - and a list caught half-recorded left objects
+// out of an in-between: the Odyssey's balloon flickering). The frame notes each list it runs, nested calls too, in
+// order; its replays run those same records (cmdbuf.c keeps their memory until the replays are done).
+static uint32_t rp_list;
+uint64_t g_interp_frames_closed;  // (cmdbuf.c: a command arena released now may still be replayed for a few frames)
+static uint64_t st_list_miss;
+void interp_list_note(uint64_t handle, const void *rec) {
+    if (g_interp_replaying || !frame_open || !lg || !rec) return;
+    GROW(lg->lists, lg->nlists, lg->cap_lists, 256);
+    lg->lists[lg->nlists].h = handle, lg->lists[lg->nlists].rec = rec;
+    lg->nlists++;
+}
+const void *interp_list_rec(uint64_t handle) {
+    if (!cur) return NULL;
+    for (uint32_t i = rp_list; i < cur->nlists && i < rp_list + 64; i++)  // (the same order as the frame: the next one)
+        if (cur->lists[i].h == handle) { rp_list = i + 1; return cur->lists[i].rec; }
+    for (uint32_t i = 0; i < cur->nlists; i++)
+        if (cur->lists[i].h == handle) return cur->lists[i].rec;
+    if (st_list_miss++ < 10) LOG("[interp] replay: list %llx was not run by its frame (left out)\n", (unsigned long long)handle);
+    return NULL;
 }
 
 // (the backend, at the frame's first list) its executor state: a replay of the frame starts from it
@@ -811,6 +837,7 @@ InterpFrame *interp_frame_close(bool log_next, uint64_t frame_no) {
     bool was_open = frame_open, was = g_interp_log;
     frame_open = false;
     g_interp_log = log_next;
+    __atomic_add_fetch(&g_interp_frames_closed, 1, __ATOMIC_RELEASE);
     if (!lg) {  // (no free slot at the last close: the interpolation thread is behind)
         pthread_mutex_lock(&fr_lock);
         for (int i = 0; i < NFR && !lg; i++) if (!fr[i].busy) { lg = &fr[i]; lg->busy = true; }
@@ -1208,7 +1235,7 @@ uint32_t interp_handles(const uint64_t **out) { *out = cur->handles; return cur-
 static uint64_t rp_t0;
 void interp_replay_begin(void) {
     g_interp_replaying = true;
-    rp_draw = rp_cb = 0;
+    rp_draw = rp_cb = rp_list = 0;
     rp_cur = -1;
     rp_t0 = plat_now_ns();
 }

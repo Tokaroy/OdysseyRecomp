@@ -929,7 +929,17 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
         if (prof)
             LOG("; backend exec %.1f (of which GPU waits %.1f), %llu draws, %llu submits", ex / 1e6, wt / 1e6,
                 (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs));
+        {   // (cmdbuf.c) the game threads' command-list table locks this frame: waits / held
+            extern void cmd_lock_stats(uint64_t *wait, uint64_t *hold);
+            uint64_t lw, lh;
+            cmd_lock_stats(&lw, &lh);
+            if (lw + lh > 5000000) LOG("; list table: waits %.1f, held %.1f ms", lw / 1e6, lh / 1e6);
+        }
         LOG(")\n");
+    } else {
+        extern void cmd_lock_stats(uint64_t *wait, uint64_t *hold);
+        uint64_t lw, lh;
+        cmd_lock_stats(&lw, &lh);  // (per frame: only a hitch's own)
     }
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
     l_block = cum_block_ns; l_link = cum_link_ns; l_build = cum_build_ns; l_held = cum_held; l_skip = stat_skipped; l_tex = tex;
@@ -6646,7 +6656,14 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
-    uint64_t p = (uint64_t)(uintptr_t)cmd_list(handle);  // (records live in host memory: runtime/nvn/cmdbuf.c)
+    uint64_t p;  // (records live in host memory: runtime/nvn/cmdbuf.c)
+    if (g_interp_replaying) {  // (a replay: the records its frame ran - the game is recording the next frame there)
+        p = (uint64_t)(uintptr_t)interp_list_rec(handle);
+        if (!p) { stat_skipped++; return; }  // (left out: the in-between isn't shown)
+    } else {
+        p = (uint64_t)(uintptr_t)cmd_list(handle);
+        if (g_interp_log) interp_list_note(handle, (const void *)(uintptr_t)p);
+    }
     if (!p) return;
     int prev_op = -1;
     uint64_t prev_t = 0;
@@ -6998,10 +7015,13 @@ bool renderer_interp_replay(void) {
     return !left_out;
 }
 
+// (0.2.8) the render thread's time on the game's own lists this frame (device.c: how many in-betweens still fit)
+uint64_t g_exec_frame_ns;
 void backend_execute(uint64_t handle) {
     extern void interp_wait_replay(void);
     interp_wait_replay();  // (device.c: the previous frame's replay first - its draws must not interleave with these)
     vk_render_lock();
+    uint64_t te0 = plat_now_ns();
     if (interp_list_submitted(handle)) interp_frame_state_save(&st, sizeof st);
     PROF_T0();
     static int prefetch = -1;  // ODYSSEY_PREFETCH=0: off
@@ -7013,6 +7033,7 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("ODYSSEY_SYNC_SUBMIT") ? 1 : 0;
     renderer_submit();
+    g_exec_frame_ns += plat_now_ns() - te0;
     vk_render_unlock();
     if (sync_submit) renderer_flush();  // (the wait outside the lock)
 }

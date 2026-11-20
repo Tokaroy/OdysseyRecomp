@@ -52,6 +52,11 @@ bool interp_prepare(float t);             // blends for an image at t (0 = previ
 bool interp_replay_lock(void);            // before replays: false when an object the frame used was freed
 void interp_replay_unlock(void);
 uint32_t interp_handles(const uint64_t **out);
+// (0.2.8) the records each list of the logged frame ran with (calls too), and in its replays those same records - the
+// game records its next frame at the same handles meanwhile. NULL: the frame ran no such list.
+void interp_list_note(uint64_t handle, const void *rec);
+const void *interp_list_rec(uint64_t handle);
+extern uint64_t g_interp_frames_closed;  // frames closed so far (cmdbuf.c keeps released command arenas a few more)
 void interp_replay_begin(void);
 void interp_replay_end(void);
 void interp_frame_rotate(void);           // (interpolation thread) after a frame: it becomes the previous one

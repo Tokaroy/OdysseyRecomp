@@ -975,7 +975,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     tabs[ntabs++] = {"Input", "Language, controllers, mouse and keyboard", 8};
     tabs[ntabs++] = {"Add-ons", "Mods for the game's files", 2};
 #ifdef ODYSSEY_DEV_TOOLS
-    if (in_game && !prelaunch) tabs[ntabs++] = {"Travel", "Kingdoms, stages and your save", 10};
+    DEV_TABS
 #endif
     if (!prelaunch) tabs[ntabs++] = {"Exit", "Leave " RT_APP_NAME, 9};
     if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
@@ -1087,7 +1087,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     case 8: tab_about(); break;
     case 9: tab_quit(scale, in_game); break;
 #ifdef ODYSSEY_DEV_TOOLS
-    case 10: tab_travel(scale); break;
+    DEV_CASES
 #endif
     }
     static const char *scroll_test = getenv("ODYSSEY_MENU_SCROLL");  // test hook: page scroll, 0..1
